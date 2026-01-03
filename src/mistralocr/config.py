@@ -7,6 +7,7 @@ and provides configuration constants for the server.
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import FrozenSet, Optional
 from dotenv import load_dotenv
 
@@ -33,6 +34,9 @@ class Settings:
         '.pdf', '.jpg', '.jpeg', '.png', '.avif'
     })
 
+    # Markdown Output Configuration
+    output_dir: str = "./ocr_output"  # Directory to save markdown files
+
     @classmethod
     def from_env(cls) -> Optional["Settings"]:
         """
@@ -57,6 +61,10 @@ class Settings:
         max_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
         max_file_size = max_size_mb * 1024 * 1024
 
+        # Get output directory and resolve to absolute path
+        output_dir = os.getenv("OCR_OUTPUT_DIR", "./ocr_output")
+        output_dir = str(Path(output_dir).resolve())
+
         return cls(
             api_key=api_key,
             api_base=os.getenv("MISTRAL_API_BASE", "https://api.mistral.ai/v1"),
@@ -64,6 +72,7 @@ class Settings:
             server_name=os.getenv("MCP_SERVER_NAME", "MistralOCR"),
             log_level=os.getenv("MCP_LOG_LEVEL", "INFO"),
             max_file_size=max_file_size,
+            output_dir=output_dir,
         )
 
 

@@ -6,7 +6,8 @@
         "/Users/hinrayleung/Dev/mcp/mistralocr/mcp_server.py"
       ],
       "env": {
-        "MISTRAL_API_KEY": "your_mistral_api_key_here"
+        "MISTRAL_API_KEY": "your_mistral_api_key_here",
+        "OCR_OUTPUT_DIR": "/Users/hinrayleung/Documents/OCR_Results"
       }
     }
   }

@@ -5,6 +5,7 @@ Defines structured output models and implements MCP tools for
 OCR processing.
 """
 
+from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -14,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 from .config import settings
 from .file_handler import FileHandler
 from .ocr_client import MistralOCRClient
+from .markdown_writer import MarkdownWriter
 
 
 # ============================================================================
@@ -55,6 +57,10 @@ class OCRResult(BaseModel):
         description="Extracted images with coordinates"
     )
     model: Optional[str] = Field(default=None, description="OCR model used")
+    markdown_path: Optional[str] = Field(
+        default=None,
+        description="Path to saved markdown file (if enabled)"
+    )
     error_message: Optional[str] = Field(
         default=None,
         description="Error message if failed"
@@ -206,6 +212,30 @@ def register_ocr_tools(mcp: FastMCP) -> None:
             for img in ocr_response['images']
         ]
 
+        # Step 7: Save to markdown file
+        markdown_path = None
+        if settings and settings.output_dir:
+            await ctx.debug("Saving OCR results to markdown file...")
+            try:
+                writer = MarkdownWriter(output_dir=settings.output_dir)
+                write_result = writer.write_ocr_result({
+                    'success': True,
+                    'file_path': file_path,
+                    'file_type': FileHandler.get_file_type(file_path) or "unknown",
+                    'total_pages': len(pages),
+                    'pages': ocr_response['pages'],
+                    'images': ocr_response['images'],
+                    'model': ocr_response['model']
+                })
+
+                if write_result.success:
+                    markdown_path = write_result.file_path
+                    await ctx.info(f"✓ Saved markdown to: {markdown_path}")
+                else:
+                    await ctx.error(f"Failed to save markdown: {write_result.error}")
+            except Exception as e:
+                await ctx.error(f"Error saving markdown: {str(e)}")
+
         return OCRResult(
             success=True,
             file_path=file_path,
@@ -213,7 +243,8 @@ def register_ocr_tools(mcp: FastMCP) -> None:
             total_pages=len(pages),
             pages=pages,
             images=images,
-            model=ocr_response['model']
+            model=ocr_response['model'],
+            markdown_path=markdown_path
         )
 
     @mcp.tool()
@@ -267,6 +298,40 @@ def register_ocr_tools(mcp: FastMCP) -> None:
             f"Batch processing complete: "
             f"{successful} succeeded, {failed} failed"
         )
+
+        # Step 7: Save batch results to markdown files
+        if settings and settings.output_dir:
+            await ctx.debug("Saving batch OCR results to markdown files...")
+            try:
+                writer = MarkdownWriter(output_dir=settings.output_dir)
+                batch_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+                # Only write successful results
+                successful_results = [
+                    {
+                        'success': True,
+                        'file_path': r.file_path,
+                        'file_type': r.file_type,
+                        'total_pages': r.total_pages,
+                        'pages': [p.model_dump() for p in r.pages],
+                        'images': [img.model_dump() for img in r.images],
+                        'model': r.model
+                    }
+                    for r in results
+                    if r.success
+                ]
+
+                write_results = writer.write_batch_results(
+                    batch_results=successful_results,
+                    batch_name=batch_name
+                )
+
+                # Log results
+                saved_count = sum(1 for r in write_results.values() if r.success)
+                await ctx.info(f"✓ Saved {saved_count} markdown files to {settings.output_dir}")
+
+            except Exception as e:
+                await ctx.error(f"Error saving batch markdown files: {str(e)}")
 
         return BatchOCRResult(
             total_files=len(file_paths),
