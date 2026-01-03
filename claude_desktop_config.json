@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "mistral-ocr": {
+      "command": "/opt/miniconda3/envs/deep-learning/bin/python",
+      "args": [
+        "/Users/hinrayleung/Dev/mcp/mistralocr/mcp_server.py"
+      ],
+      "env": {
+        "MISTRAL_API_KEY": "your_mistral_api_key_here"
+      }
+    }
+  }
+}

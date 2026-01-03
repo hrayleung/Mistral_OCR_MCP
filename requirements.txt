@@ -1,0 +1,12 @@
+# MCP Framework
+mcp>=1.22.0
+fastmcp>=2.13.0
+
+# Mistral AI Client
+mistralai>=1.9.0
+
+# Environment Management
+python-dotenv>=1.0.0
+
+# Type Validation
+pydantic>=2.0.0
