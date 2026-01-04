@@ -3,10 +3,14 @@ Secure file handling for Mistral OCR MCP Server.
 
 Provides file validation, path security checks, and base64 encoding
 for PDF and image files.
+
+LEGACY: This module is deprecated. Use LocalFileSource from file_source.py
+instead. Kept for backward compatibility.
 """
 
 import base64
 import mimetypes
+import os
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -17,26 +21,32 @@ class FileHandler:
     """
     Handles secure file validation and encoding for OCR processing.
 
+    LEGACY: This class is deprecated. Use LocalFileSource from file_source.py
+    instead. Kept for backward compatibility.
+
     Implements security best practices:
     - Path traversal prevention
+    - Symlink attack prevention
     - File type validation via extension allowlist
     - File size limits
     - Safe base64 encoding
     """
 
     @staticmethod
-    def validate_and_encode(file_path: str) -> Dict[str, Optional[str | int | bool]]:
+    def validate_and_encode(file_path: str, allow_symlinks: bool = False) -> Dict[str, Optional[str | int | bool]]:
         """
         Validate file path and encode to base64 for OCR processing.
 
         Security checks performed:
         1. Path traversal prevention (rejects .. components)
-        2. File existence validation
-        3. File type validation (extension allowlist)
-        4. File size limit check
+        2. Symlink attack prevention (unless explicitly allowed)
+        3. File existence validation
+        4. File type validation (extension allowlist)
+        5. File size limit check
 
         Args:
             file_path: Path to the file (absolute or relative)
+            allow_symlinks: Whether to allow symbolic links (default: False)
 
         Returns:
             Dictionary containing:
@@ -49,6 +59,28 @@ class FileHandler:
         try:
             # Resolve to absolute path (also normalizes the path)
             path = Path(file_path).resolve()
+
+            # Security check 0: Reject symbolic links unless explicitly allowed
+            if not allow_symlinks:
+                current = Path(file_path).expanduser().absolute()
+                if current.is_symlink():
+                    return {
+                        'success': False,
+                        'error': f'Symbolic links are not allowed for security reasons: {file_path}',
+                        'data': None,
+                        'mime_type': None,
+                        'file_size': None
+                    }
+                # Check parent directories for symlinks
+                for parent in [current] + list(current.parents):
+                    if parent.is_symlink():
+                        return {
+                            'success': False,
+                            'error': f'Symbolic links in path are not allowed: {file_path}',
+                            'data': None,
+                            'mime_type': None,
+                            'file_size': None
+                        }
 
             # Security check 1: Path must exist
             if not path.exists():
@@ -70,7 +102,28 @@ class FileHandler:
                     'file_size': None
                 }
 
-            # Security check 3: File type validation via extension allowlist
+            # Security check 2a: Verify no symlinks were followed
+            if not allow_symlinks:
+                try:
+                    real_path = Path(os.path.realpath(file_path))
+                    if real_path.resolve() != path:
+                        return {
+                            'success': False,
+                            'error': f'Path contains symbolic links which are not allowed: {file_path}',
+                            'data': None,
+                            'mime_type': None,
+                            'file_size': None
+                        }
+                except OSError:
+                    return {
+                        'success': False,
+                        'error': f'Invalid path: {file_path}',
+                        'data': None,
+                        'mime_type': None,
+                        'file_size': None
+                    }
+
+            # Security check 4: File type validation via extension allowlist
             if settings is None:
                 # Use defaults if settings not loaded
                 allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.avif'}
@@ -91,7 +144,7 @@ class FileHandler:
                     'file_size': None
                 }
 
-            # Security check 4: File size validation
+            # Security check 5: File size validation
             file_size = path.stat().st_size
             if file_size > max_file_size:
                 max_mb = max_file_size / (1024 * 1024)

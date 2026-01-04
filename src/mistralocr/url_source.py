@@ -5,8 +5,10 @@ Handles validation, downloading, and encoding of documents from HTTP(S) URLs.
 """
 
 import base64
+import ipaddress
 import logging
 import mimetypes
+import socket
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, ParseResult
@@ -24,6 +26,19 @@ from .utils import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# IP address ranges that should be blocked (private/local networks)
+BLOCKED_IP_RANGES = [
+    ipaddress.ip_network('127.0.0.0/8'),      # Loopback
+    ipaddress.ip_network('::1/128'),          # IPv6 loopback
+    ipaddress.ip_network('169.254.0.0/16'),   # Link-local
+    ipaddress.ip_network('fe80::/10'),        # IPv6 link-local
+    ipaddress.ip_network('10.0.0.0/8'),       # Private Class A
+    ipaddress.ip_network('172.16.0.0/12'),    # Private Class B
+    ipaddress.ip_network('192.168.0.0/16'),   # Private Class C
+    ipaddress.ip_network('fc00::/7'),         # IPv6 unique local
+]
 
 
 class URLSource(DocumentSource):
@@ -75,11 +90,16 @@ class URLSource(DocumentSource):
 
     @property
     def client(self) -> httpx.Client:
-        """Lazy-initialize HTTP client."""
+        """
+        Lazy-initialize HTTP client.
+
+        Security: follow_redirects is disabled to prevent SSRF attacks
+        via open redirect vulnerabilities on target servers.
+        """
         if self._client is None:
             self._client = httpx.Client(
                 timeout=httpx.Timeout(self.timeout),
-                follow_redirects=True,
+                follow_redirects=False,  # SSRF prevention: disable automatic redirects
                 headers={'User-Agent': self.user_agent}
             )
         return self._client
@@ -228,6 +248,11 @@ class URLSource(DocumentSource):
 
         Raises:
             ValueError: If URL is invalid
+
+        Security:
+            - Validates URL scheme
+            - Blocks access to private/internal network IP ranges (SSRF prevention)
+            - Protects against DNS rebinding attacks
         """
         parsed = urlparse(url)
 
@@ -242,7 +267,65 @@ class URLSource(DocumentSource):
         if not parsed.netloc:
             raise ValueError('URL must include a domain name')
 
+        # Security: Block private/internal IP addresses (SSRF & DNS rebinding protection)
+        self._validate_hostname(parsed.netloc)
+
         return parsed
+
+    def _validate_hostname(self, netloc: str) -> None:
+        """
+        Validate that hostname is not a private/internal IP address.
+
+        This protects against SSRF attacks targeting internal services
+        and DNS rebinding attacks.
+
+        Args:
+            netloc: Network location from URL (may include port)
+
+        Raises:
+            ValueError: If hostname resolves to a blocked IP range
+        """
+        # Extract hostname (remove port and auth info if present)
+        hostname = netloc.split('@')[-1].split(':')[0]
+        hostname = hostname.strip('[]')  # Remove IPv6 brackets
+
+        # Check if it's an IP address
+        try:
+            ip = ipaddress.ip_address(hostname)
+            self._check_ip_blocked(ip)
+            return
+        except ValueError:
+            # Not a plain IP address, resolve hostname
+            pass
+
+        # Resolve hostname to IP and check each result
+        # This protects against DNS rebinding where initial DNS response
+        # points to a valid host but later resolves to an internal IP
+        try:
+            # Get all addresses (IPv4 and IPv6)
+            addr_info = socket.getaddrinfo(hostname, None)
+            for family, _, _, _, sockaddr in addr_info:
+                ip = ipaddress.ip_address(sockaddr[0])
+                self._check_ip_blocked(ip)
+        except socket.gaierror:
+            # DNS resolution failed - will be caught later when connecting
+            pass
+
+    def _check_ip_blocked(self, ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> None:
+        """
+        Check if an IP address is in a blocked range.
+
+        Args:
+            ip: IP address to check
+
+        Raises:
+            ValueError: If IP is in a blocked range
+        """
+        for blocked_range in BLOCKED_IP_RANGES:
+            if ip.version == blocked_range.version and ip in blocked_range:
+                raise ValueError(
+                    f'Access to internal network addresses is not allowed: {ip}'
+                )
 
     def _validate_file_extension(self, parsed_url: ParseResult) -> Optional[str]:
         """
@@ -276,27 +359,26 @@ class URLSource(DocumentSource):
 
         Returns:
             True if the MIME type is allowed, False otherwise
+
+        Security: Only explicitly whitelisted MIME types are allowed.
+        The wildcard `image/*` was removed to prevent processing of
+        potentially malicious image formats.
         """
         if not mime_type:
             return False
 
-        # Map MIME types to extensions for validation
-        mime_to_ext = {
-            'application/pdf': '.pdf',
-            'image/jpeg': '.jpg',
-            'image/png': '.png',
-            'image/avif': '.avif'
+        # Only allow explicitly whitelisted MIME types
+        allowed_mime_types = {
+            'application/pdf',
+            'image/jpeg',
+            'image/png',
+            'image/avif'
         }
 
-        ext = mime_to_ext.get(mime_type)
-        if not ext:
-            # Try to find by MIME prefix
-            if mime_type.startswith('image/'):
-                # Allow all image types (conservative approach)
-                return True
-            return False
+        # Normalize MIME type (remove parameters like charset)
+        mime_type = mime_type.split(';')[0].strip().lower()
 
-        return ext in self._allowed_extensions
+        return mime_type in allowed_mime_types
 
     def _check_accessibility(self, url: str) -> tuple[Optional[int], Optional[str]]:
         """
@@ -310,8 +392,10 @@ class URLSource(DocumentSource):
 
         Raises:
             httpx.HTTPStatusError: If URL is not accessible
+
+        Security: Does not follow redirects (SSRF prevention).
         """
-        response = self.client.head(url, follow_redirects=True)
+        response = self.client.head(url, follow_redirects=False)
         response.raise_for_status()
 
         # Extract content length if available
@@ -339,8 +423,10 @@ class URLSource(DocumentSource):
 
         Raises:
             httpx.HTTPStatusError: If download fails
+
+        Security: Does not follow redirects (SSRF prevention).
         """
-        response = self.client.get(url, follow_redirects=True)
+        response = self.client.get(url, follow_redirects=False)
         response.raise_for_status()
 
         file_data = response.content

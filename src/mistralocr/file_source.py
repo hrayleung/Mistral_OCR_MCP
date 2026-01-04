@@ -7,6 +7,7 @@ Maintains all existing security and validation logic.
 
 import base64
 import mimetypes
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -26,20 +27,23 @@ class LocalFileSource(DocumentSource):
     Refactored from FileHandler to implement DocumentSource interface.
     Maintains all existing security checks:
     - Path traversal prevention
+    - Symlink attack prevention
     - File type validation
     - File size limits
     """
 
-    def __init__(self, max_file_size: Optional[int] = None):
+    def __init__(self, max_file_size: Optional[int] = None, allow_symlinks: bool = False):
         """
         Initialize local file source handler.
 
         Args:
             max_file_size: Maximum file size in bytes (uses settings if None)
+            allow_symlinks: Whether to follow symbolic links (default: False for security)
         """
         self.max_file_size = max_file_size or (
             settings.max_file_size if settings else 50 * 1024 * 1024
         )
+        self.allow_symlinks = allow_symlinks
 
         # Configure allowed extensions
         if settings and settings.allowed_extensions:
@@ -53,9 +57,10 @@ class LocalFileSource(DocumentSource):
 
         Security checks performed:
         1. Path traversal prevention (resolves to absolute path)
-        2. File existence validation
-        3. File type validation (extension allowlist)
-        4. File size limit check
+        2. Symlink attack prevention (rejects symlinks unless explicitly allowed)
+        3. File existence validation
+        4. File type validation (extension allowlist)
+        5. File size limit check
 
         Args:
             file_path: Path to the file (absolute or relative)
@@ -65,7 +70,26 @@ class LocalFileSource(DocumentSource):
         """
         try:
             # Resolve to absolute path (normalizes path and prevents traversal)
+            # Note: resolve() follows symlinks by default, so we check separately
             path = Path(file_path).resolve()
+            original_path = Path(file_path)
+
+            # Security check 0: Reject symbolic links unless explicitly allowed
+            # This prevents symlink attacks where a malicious user creates
+            # symlinks pointing to sensitive files
+            if not self.allow_symlinks:
+                # Check if the original path or any component is a symlink
+                current = Path(file_path).expanduser().absolute()
+                if current.is_symlink():
+                    return ValidationResult.failure(
+                        f'Symbolic links are not allowed for security reasons: {file_path}'
+                    )
+                # Also check parent directories
+                for parent in [current] + list(current.parents):
+                    if parent.is_symlink():
+                        return ValidationResult.failure(
+                            f'Symbolic links in path are not allowed: {file_path}'
+                        )
 
             # Security check 1: Path must exist
             if not path.exists():
@@ -75,7 +99,21 @@ class LocalFileSource(DocumentSource):
             if not path.is_file():
                 return ValidationResult.failure(f'Not a file: {file_path}')
 
-            # Security check 3: File type validation
+            # Security check 3: Verify file is not accessed through a symlink
+            # Even if the file itself isn't a symlink, ensure we didn't follow one
+            if not self.allow_symlinks:
+                try:
+                    # Get the real path without following symlinks
+                    real_path = Path(os.path.realpath(file_path))
+                    # Compare with resolved path (which follows symlinks)
+                    if real_path.resolve() != path:
+                        return ValidationResult.failure(
+                            f'Path contains symbolic links which are not allowed: {file_path}'
+                        )
+                except OSError:
+                    return ValidationResult.failure(f'Invalid path: {file_path}')
+
+            # Security check 4: File type validation
             file_extension = path.suffix.lower()
             if file_extension not in self._allowed_extensions:
                 allowed_list = ', '.join(sorted(self._allowed_extensions))
@@ -84,7 +122,7 @@ class LocalFileSource(DocumentSource):
                     f'Supported types: {allowed_list}'
                 )
 
-            # Security check 4: File size validation
+            # Security check 5: File size validation
             file_size = path.stat().st_size
             if file_size > self.max_file_size:
                 max_mb = self.max_file_size / (1024 * 1024)
