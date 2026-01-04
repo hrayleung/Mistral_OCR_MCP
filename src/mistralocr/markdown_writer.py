@@ -7,10 +7,14 @@ with rich metadata and conflict resolution via timestamps.
 
 import logging
 import os
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, List
 from dataclasses import dataclass
+from urllib.parse import urlparse
+
+from .utils import extract_filename_from_url, sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -198,33 +202,30 @@ class MarkdownWriter:
 
     def _derive_base_filename(self, file_path: str) -> str:
         """
-        Extract base filename from source file path.
+        Extract base filename from source file path or URL.
 
         Args:
-            file_path: Source file path
+            file_path: Source file path or URL
 
         Returns:
-            Base filename without extension (e.g., "document" from "/path/to/document.pdf")
+            Base filename without extension
+            (e.g., "document" from "/path/to/document.pdf" or "https://example.com/document.pdf")
         """
-        path = Path(file_path)
-        stem = path.stem
+        # Handle URLs differently
+        if file_path.startswith(('http://', 'https://')):
+            stem = extract_filename_from_url(file_path)
+        else:
+            # Handle local file paths
+            path = Path(file_path)
+            stem = path.stem
 
-        if not stem or stem in ('.', '..'):
-            # Generate unique identifier for unnamed files
-            import hashlib
-            hash_obj = hashlib.md5(file_path.encode())
-            return f"unnamed_{hash_obj.hexdigest()[:8]}"
-
-        # Sanitize filename: remove invalid characters
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            stem = stem.replace(char, '_')
-
-        return stem
+        return sanitize_filename(stem, fallback_hash_source=file_path)
 
     def _generate_filepath(self, base_filename: str) -> Path:
         """
-        Generate conflict-free filepath with timestamp if needed.
+        Generate conflict-free filepath with UUID for guaranteed uniqueness.
+
+        Using UUID ensures no race condition even with concurrent processing.
 
         Args:
             base_filename: Base filename without extension
@@ -232,23 +233,10 @@ class MarkdownWriter:
         Returns:
             Resolved Path object with unique filename
         """
-        # Try base filename first
-        candidate = self.output_dir / f"{base_filename}.md"
-
-        if not candidate.exists():
-            return candidate
-
-        # Add timestamp for conflict resolution
+        # Use UUID for guaranteed uniqueness (avoids race conditions)
+        unique_id = uuid.uuid4().hex[:8]
         timestamp = datetime.now().strftime(self.config.timestamp_format)
-        candidate = self.output_dir / f"{base_filename}_{timestamp}.md"
-
-        # Handle unlikely race condition with counter
-        counter = 0
-        while candidate.exists():
-            counter += 1
-            candidate = self.output_dir / f"{base_filename}_{timestamp}_{counter}.md"
-
-        return candidate
+        return self.output_dir / f"{base_filename}_{timestamp}_{unique_id}.md"
 
     # ========================================================================
     # Private Methods - Markdown Formatting
@@ -311,15 +299,24 @@ class MarkdownWriter:
         timestamp: datetime
     ) -> List[str]:
         """Format document metadata header with YAML frontmatter."""
+        # Extract display name for title (handle URLs)
+        if source_file.startswith(('http://', 'https://')):
+            parsed = urlparse(source_file)
+            doc_name = Path(parsed.path).name or "document"
+            source_display = source_file  # Use full URL
+        else:
+            doc_name = Path(source_file).name
+            source_display = source_file
+
         lines = [
             "---",
-            f"source: {source_file}",
+            f"source: {source_display}",
             f"type: {file_type}",
             f"model: {model}",
             f"processed: {timestamp.isoformat()}",
             "---",
             "",
-            f"# Document: {Path(source_file).name}",
+            f"# Document: {doc_name}",
             ""
         ]
         return lines

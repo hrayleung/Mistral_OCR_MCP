@@ -16,6 +16,8 @@ from .config import settings
 from .file_handler import FileHandler
 from .ocr_client import MistralOCRClient
 from .markdown_writer import MarkdownWriter
+from .source_factory import get_source_factory
+from .document_source import DocumentSourceType
 
 
 # ============================================================================
@@ -46,10 +48,14 @@ class OCRImage(BaseModel):
 
 
 class OCRResult(BaseModel):
-    """Complete OCR result for a single file."""
+    """Complete OCR result for a single file or URL."""
     success: bool = Field(description="Whether OCR succeeded")
-    file_path: str = Field(description="Processed file path")
+    file_path: str = Field(description="Source identifier (file path or URL)")
     file_type: str = Field(description="File type: pdf or image")
+    source_type: str = Field(
+        default="local_file",
+        description="Source type: local_file or url"
+    )
     total_pages: int = Field(description="Total pages processed")
     pages: List[OCRPage] = Field(description="Array of page results")
     images: List[OCRImage] = Field(
@@ -100,50 +106,107 @@ def register_ocr_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def ocr_process_file(
         ctx: Context,
-        file_path: str,
+        file_path: Optional[str] = None,
+        url: Optional[str] = None,
         include_images: bool = False
     ) -> OCRResult:
         """
-        Process a single file (PDF or image) with OCR.
+        Process a single document (PDF or image) with OCR.
 
+        Supports both local files and publicly accessible URLs.
         Extracts text and structure from PDF documents and images using
         Mistral's OCR API. Returns structured results with page-by-page
         text extraction and metadata.
 
         Args:
-            file_path: Absolute path to the file to process
+            file_path: Absolute path to local file (mutually exclusive with url)
+            url: Public URL to document (mutually exclusive with file_path)
             include_images: Whether to include base64-encoded images in output
 
         Returns:
             OCRResult: Structured OCR results with pages, text, and metadata
         """
-        await ctx.info(f"Starting OCR processing for: {file_path}")
-
-        # Step 1: Validate and encode file
-        await ctx.debug("Validating file and encoding to base64...")
-        file_result = FileHandler.validate_and_encode(file_path)
-
-        if not file_result['success']:
-            await ctx.error(f"File validation failed: {file_result['error']}")
+        # Validate mutual exclusivity of parameters
+        if file_path is not None and url is not None:
+            await ctx.error("Cannot specify both file_path and url parameters")
             return OCRResult(
                 success=False,
-                file_path=file_path,
+                file_path="unknown",
                 file_type="unknown",
+                source_type="unknown",
                 total_pages=0,
                 pages=[],
                 images=[],
-                error_message=file_result['error']
+                error_message="Cannot specify both 'file_path' and 'url' parameters. "
+                             "Please provide only one source."
             )
 
-        await ctx.info(f"File validated successfully ({file_result['file_size']} bytes)")
+        if file_path is None and url is None:
+            await ctx.error("Must specify either file_path or url parameter")
+            return OCRResult(
+                success=False,
+                file_path="unknown",
+                file_type="unknown",
+                source_type="unknown",
+                total_pages=0,
+                pages=[],
+                images=[],
+                error_message="Must specify either 'file_path' or 'url' parameter."
+            )
+
+        # Create descriptor and source using factory
+        factory = get_source_factory()
+        try:
+            descriptor = factory.create_descriptor(file_path=file_path, url=url)
+        except ValueError as e:
+            await ctx.error(f"Invalid source specification: {str(e)}")
+            return OCRResult(
+                success=False,
+                file_path=file_path or url or "unknown",
+                file_type="unknown",
+                source_type="unknown",
+                total_pages=0,
+                pages=[],
+                images=[],
+                error_message=str(e)
+            )
+
+        source = factory.get_source(descriptor)
+
+        await ctx.info(
+            f"Starting OCR processing for {descriptor.source_type.value}: "
+            f"{descriptor.identifier}"
+        )
+
+        # Step 1: Validate and encode document
+        await ctx.debug(f"Validating {descriptor.source_type.value} and encoding to base64...")
+        validation_result = source.validate_and_encode(descriptor.identifier)
+
+        if not validation_result.success:
+            await ctx.error(f"Document validation failed: {validation_result.error}")
+            return OCRResult(
+                success=False,
+                file_path=descriptor.identifier,
+                file_type="unknown",
+                source_type=descriptor.source_type.value,
+                total_pages=0,
+                pages=[],
+                images=[],
+                error_message=validation_result.error
+            )
+
+        await ctx.info(
+            f"Document validated successfully ({validation_result.size_bytes} bytes)"
+        )
 
         # Step 2: Check configuration
         if settings is None or not settings.api_key:
             await ctx.error("MISTRAL_API_KEY not configured")
             return OCRResult(
                 success=False,
-                file_path=file_path,
+                file_path=descriptor.identifier,
                 file_type="unknown",
+                source_type=descriptor.source_type.value,
                 total_pages=0,
                 pages=[],
                 images=[],
@@ -162,16 +225,17 @@ def register_ocr_tools(mcp: FastMCP) -> None:
         await ctx.info("Sending document to Mistral OCR API...")
         try:
             ocr_response = ocr_client.process_document(
-                base64_data=file_result['data'],
-                mime_type=file_result['mime_type'],
+                base64_data=validation_result.data,
+                mime_type=validation_result.mime_type,
                 include_images=include_images
             )
         except Exception as e:
             await ctx.error(f"OCR processing failed: {str(e)}")
             return OCRResult(
                 success=False,
-                file_path=file_path,
-                file_type=FileHandler.get_file_type(file_path) or "unknown",
+                file_path=descriptor.identifier,
+                file_type=source.get_file_type(descriptor.identifier) or "unknown",
+                source_type=descriptor.source_type.value,
                 total_pages=0,
                 pages=[],
                 images=[],
@@ -183,8 +247,9 @@ def register_ocr_tools(mcp: FastMCP) -> None:
             await ctx.error(f"Mistral API error: {ocr_response['error']}")
             return OCRResult(
                 success=False,
-                file_path=file_path,
-                file_type=FileHandler.get_file_type(file_path) or "unknown",
+                file_path=descriptor.identifier,
+                file_type=source.get_file_type(descriptor.identifier) or "unknown",
+                source_type=descriptor.source_type.value,
                 total_pages=0,
                 pages=[],
                 images=[],
@@ -220,8 +285,8 @@ def register_ocr_tools(mcp: FastMCP) -> None:
                 writer = MarkdownWriter(output_dir=settings.output_dir)
                 write_result = writer.write_ocr_result({
                     'success': True,
-                    'file_path': file_path,
-                    'file_type': FileHandler.get_file_type(file_path) or "unknown",
+                    'file_path': descriptor.identifier,
+                    'file_type': source.get_file_type(descriptor.identifier) or "unknown",
                     'total_pages': len(pages),
                     'pages': ocr_response['pages'],
                     'images': ocr_response['images'],
@@ -238,8 +303,9 @@ def register_ocr_tools(mcp: FastMCP) -> None:
 
         return OCRResult(
             success=True,
-            file_path=file_path,
-            file_type=FileHandler.get_file_type(file_path) or "unknown",
+            file_path=descriptor.identifier,
+            file_type=source.get_file_type(descriptor.identifier) or "unknown",
+            source_type=descriptor.source_type.value,
             total_pages=len(pages),
             pages=pages,
             images=images,
@@ -250,96 +316,122 @@ def register_ocr_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def ocr_batch_process(
         ctx: Context,
-        file_paths: List[str],
+        sources: List[str],
         include_images: bool = False
     ) -> BatchOCRResult:
         """
-        Process multiple files (PDFs and images) with OCR in batch.
+        Process multiple documents (PDFs and images) with OCR in batch.
 
-        Processes multiple files sequentially, continuing even if individual
-        files fail. Returns summary statistics and individual results.
+        Supports mixing local files and URLs in a single batch.
+        Processes multiple documents sequentially, continuing even if individual
+        documents fail. Returns summary statistics and individual results.
 
         Args:
-            file_paths: List of absolute paths to files to process
+            sources: List of source identifiers (file paths or URLs).
+                     URLs are auto-detected by http:// or https:// prefix.
             include_images: Whether to include base64-encoded images in output
 
         Returns:
-            BatchOCRResult: Summary with individual results for each file
+            BatchOCRResult: Summary with individual results for each document
         """
-        await ctx.info(f"Starting batch OCR processing for {len(file_paths)} files")
-
-        results = []
-        errors = []
-        successful = 0
-        failed = 0
-
-        for idx, file_path in enumerate(file_paths, 1):
-            await ctx.info(f"Processing file {idx}/{len(file_paths)}: {file_path}")
-
-            # Process each file
-            result = await ocr_process_file(
-                file_path=file_path,
-                include_images=include_images,
-                ctx=ctx
-            )
-
-            results.append(result)
-
-            if result.success:
-                successful += 1
-                await ctx.info(f"✓ Success: {file_path}")
-            else:
-                failed += 1
-                error_msg = f"{file_path}: {result.error_message}"
-                errors.append(error_msg)
-                await ctx.error(f"✗ Failed: {file_path} - {result.error_message}")
-
         await ctx.info(
-            f"Batch processing complete: "
-            f"{successful} succeeded, {failed} failed"
+            f"Starting batch OCR processing for {len(sources)} sources "
+            f"(files and URLs)"
         )
 
-        # Step 7: Save batch results to markdown files
-        if settings and settings.output_dir:
-            await ctx.debug("Saving batch OCR results to markdown files...")
-            try:
-                writer = MarkdownWriter(output_dir=settings.output_dir)
-                batch_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        factory = get_source_factory()
+        try:
+            results = []
+            errors = []
+            successful = 0
+            failed = 0
 
-                # Only write successful results
-                successful_results = [
-                    {
-                        'success': True,
-                        'file_path': r.file_path,
-                        'file_type': r.file_type,
-                        'total_pages': r.total_pages,
-                        'pages': [p.model_dump() for p in r.pages],
-                        'images': [img.model_dump() for img in r.images],
-                        'model': r.model
-                    }
-                    for r in results
-                    if r.success
-                ]
+            for idx, source in enumerate(sources, 1):
+                # Auto-detect source type
+                descriptor = factory.create_descriptor_auto(source)
+                source_type_label = "URL" if descriptor.is_url else "file"
 
-                write_results = writer.write_batch_results(
-                    batch_results=successful_results,
-                    batch_name=batch_name
+                await ctx.info(
+                    f"Processing source {idx}/{len(sources)}: {source} "
+                    f"(detected as {source_type_label})"
                 )
 
-                # Log results
-                saved_count = sum(1 for r in write_results.values() if r.success)
-                await ctx.info(f"✓ Saved {saved_count} markdown files to {settings.output_dir}")
+                # Process each source by routing to appropriate handler
+                if descriptor.is_url:
+                    result = await ocr_process_file(
+                        file_path=None,
+                        url=source,
+                        include_images=include_images,
+                        ctx=ctx
+                    )
+                else:
+                    result = await ocr_process_file(
+                        file_path=source,
+                        url=None,
+                        include_images=include_images,
+                        ctx=ctx
+                    )
 
-            except Exception as e:
-                await ctx.error(f"Error saving batch markdown files: {str(e)}")
+                results.append(result)
 
-        return BatchOCRResult(
-            total_files=len(file_paths),
-            successful=successful,
-            failed=failed,
-            results=results,
-            errors=errors
-        )
+                if result.success:
+                    successful += 1
+                    await ctx.info(f"Success: {source}")
+                else:
+                    failed += 1
+                    error_msg = f"{source}: {result.error_message}"
+                    errors.append(error_msg)
+                    await ctx.error(f"Failed: {source} - {result.error_message}")
+
+            await ctx.info(
+                f"Batch processing complete: "
+                f"{successful} succeeded, {failed} failed"
+            )
+
+            # Step 7: Save batch results to markdown files
+            if settings and settings.output_dir:
+                await ctx.debug("Saving batch OCR results to markdown files...")
+                try:
+                    writer = MarkdownWriter(output_dir=settings.output_dir)
+                    batch_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+                    # Only write successful results
+                    successful_results = [
+                        {
+                            'success': True,
+                            'file_path': r.file_path,
+                            'file_type': r.file_type,
+                            'total_pages': r.total_pages,
+                            'pages': [p.model_dump() for p in r.pages],
+                            'images': [img.model_dump() for img in r.images],
+                            'model': r.model
+                        }
+                        for r in results
+                        if r.success
+                    ]
+
+                    write_results = writer.write_batch_results(
+                        batch_results=successful_results,
+                        batch_name=batch_name
+                    )
+
+                    # Log results
+                    saved_count = sum(1 for r in write_results.values() if r.success)
+                    await ctx.info(f"Saved {saved_count} markdown files to {settings.output_dir}")
+
+                except Exception as e:
+                    await ctx.error(f"Error saving batch markdown files: {str(e)}")
+
+            return BatchOCRResult(
+                total_files=len(sources),
+                successful=successful,
+                failed=failed,
+                results=results,
+                errors=errors
+            )
+        finally:
+            # Ensure HTTP client is closed after batch processing
+            factory.close()
 
     @mcp.tool()
     async def ocr_get_supported_formats(ctx: Context) -> SupportedFormats:

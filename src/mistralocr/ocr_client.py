@@ -66,13 +66,23 @@ class MistralOCRClient:
             # Construct data URI format required by Mistral API
             data_uri = f"data:{mime_type};base64,{base64_data}"
 
+            # Determine document type based on MIME type
+            # Images use "image_url", PDFs use "document_url"
+            if mime_type.startswith('image/'):
+                document = {
+                    "type": "image_url",
+                    "image_url": {"url": data_uri}
+                }
+            else:  # PDF or other document types
+                document = {
+                    "type": "document_url",
+                    "document_url": data_uri
+                }
+
             # Call Mistral OCR API
             response: OCRResponse = self.client.ocr.process(
                 model=self.model,
-                document={
-                    "type": "document_url",
-                    "document_url": data_uri
-                },
+                document=document,
                 include_image_base64=include_images
             )
 
