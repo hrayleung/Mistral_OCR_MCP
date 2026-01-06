@@ -49,7 +49,10 @@ class LocalFileSource(DocumentSource):
         if settings and settings.allowed_extensions:
             self._allowed_extensions = settings.allowed_extensions
         else:
-            self._allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.avif'}
+            self._allowed_extensions = {
+                '.pdf', '.docx', '.pptx', '.txt',
+                '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'
+            }
 
     def validate_and_encode(self, file_path: str) -> ValidationResult:
         """

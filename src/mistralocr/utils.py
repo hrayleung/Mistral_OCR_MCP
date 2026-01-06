@@ -11,11 +11,18 @@ from typing import Optional
 
 # MIME type mapping for file extensions
 MIME_TYPE_MAP = {
+    # Document formats
     '.pdf': 'application/pdf',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    '.txt': 'text/plain',
+    # Image formats
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.png': 'image/png',
-    '.avif': 'image/avif'
+    '.avif': 'image/avif',
+    '.tiff': 'image/tiff',
+    '.tif': 'image/tiff'
 }
 
 
@@ -31,12 +38,14 @@ def get_file_type_from_extension(extension: str) -> Optional[str]:
         extension: File extension (with or without leading dot)
 
     Returns:
-        File type string ('pdf', 'image', or None if unknown)
+        File type string ('pdf', 'document', 'image', or None if unknown)
     """
     ext = extension.lower()
     if ext == '.pdf':
         return 'pdf'
-    elif ext in {'.jpg', '.jpeg', '.png', '.avif'}:
+    elif ext in {'.docx', '.pptx', '.txt'}:
+        return 'document'
+    elif ext in {'.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'}:
         return 'image'
     return None
 

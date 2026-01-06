@@ -83,7 +83,10 @@ class URLSource(DocumentSource):
         if settings and settings.allowed_extensions:
             self._allowed_extensions = settings.allowed_extensions
         else:
-            self._allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.avif'}
+            self._allowed_extensions = {
+                '.pdf', '.docx', '.pptx', '.txt',
+                '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'
+            }
 
         # Configure HTTP client with sensible defaults
         self._client = None
@@ -335,7 +338,7 @@ class URLSource(DocumentSource):
             parsed_url: Parsed URL result
 
         Returns:
-            File type ('pdf', 'image') or None if unsupported
+            File type ('pdf', 'document', 'image') or None if unsupported
         """
         path = parsed_url.path.lower()
         extension = Path(path).suffix
@@ -345,7 +348,9 @@ class URLSource(DocumentSource):
 
         if extension == '.pdf':
             return 'pdf'
-        elif extension in {'.jpg', '.jpeg', '.png', '.avif'}:
+        elif extension in {'.docx', '.pptx', '.txt'}:
+            return 'document'
+        elif extension in {'.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'}:
             return 'image'
 
         return None
@@ -370,9 +375,13 @@ class URLSource(DocumentSource):
         # Only allow explicitly whitelisted MIME types
         allowed_mime_types = {
             'application/pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            'text/plain',
             'image/jpeg',
             'image/png',
-            'image/avif'
+            'image/avif',
+            'image/tiff'
         }
 
         # Normalize MIME type (remove parameters like charset)

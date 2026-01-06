@@ -449,7 +449,10 @@ def register_ocr_tools(mcp: FastMCP) -> None:
         # Use defaults if settings not loaded
         if settings is None:
             return SupportedFormats(
-                formats=['.pdf', '.jpg', '.jpeg', '.png', '.avif'],
+                formats=[
+                    '.pdf', '.docx', '.pptx', '.txt',
+                    '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'
+                ],
                 max_file_size_mb=50
             )
 

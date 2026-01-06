@@ -126,7 +126,10 @@ class FileHandler:
             # Security check 4: File type validation via extension allowlist
             if settings is None:
                 # Use defaults if settings not loaded
-                allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.avif'}
+                allowed_extensions = {
+                    '.pdf', '.docx', '.pptx', '.txt',
+                    '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'
+                }
                 max_file_size = 50 * 1024 * 1024  # 50MB
             else:
                 allowed_extensions = settings.allowed_extensions
@@ -221,7 +224,7 @@ class FileHandler:
             file_path: Path to the file
 
         Returns:
-            File type string ('pdf', 'image', or None if unknown)
+            File type string ('pdf', 'document', 'image', or None if unknown)
         """
         try:
             path = Path(file_path)
@@ -229,7 +232,9 @@ class FileHandler:
 
             if extension == '.pdf':
                 return 'pdf'
-            elif extension in {'.jpg', '.jpeg', '.png', '.avif'}:
+            elif extension in {'.docx', '.pptx', '.txt'}:
+                return 'document'
+            elif extension in {'.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'}:
                 return 'image'
             else:
                 return None

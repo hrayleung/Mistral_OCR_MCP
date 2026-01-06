@@ -1,10 +1,10 @@
 # Mistral OCR MCP Server
 
-A Model Context Protocol (MCP) server that provides PDF and image OCR capabilities using Mistral's OCR API. This server exposes tools for extracting text and structure from documents, returning structured JSON results with page-by-page metadata.
+A Model Context Protocol (MCP) server that provides PDF and document OCR capabilities using Mistral's OCR API. This server exposes tools for extracting text and structure from documents, returning structured JSON results with page-by-page metadata.
 
 ## Features
 
-- **Single File OCR**: Process individual PDFs and images (JPG, PNG, AVIF)
+- **Single File OCR**: Process PDFs, Word docs, PowerPoint, text files, and images (JPG, PNG, AVIF, TIFF)
 - **Batch Processing**: Process multiple files sequentially with error recovery
 - **Structured Output**: Returns JSON with page numbers, text, dimensions, and image coordinates
 - **Automatic Markdown Export**: Saves OCR results as formatted markdown files with rich metadata
@@ -174,7 +174,7 @@ Get supported file formats and configuration limits.
 **Returns:**
 ```json
 {
-  "formats": [".pdf", ".jpg", ".jpeg", ".png", ".avif"],
+  "formats": [".pdf", ".docx", ".pptx", ".txt", ".jpg", ".jpeg", ".png", ".avif", ".tiff", ".tif"],
   "max_file_size_mb": 50
 }
 ```
@@ -289,7 +289,7 @@ All tools return structured JSON with error information:
 The server implements several security measures:
 
 1. **Path Traversal Prevention**: All file paths are validated and resolved
-2. **File Type Validation**: Only allowed extensions (`.pdf`, `.jpg`, `.jpeg`, `.png`, `.avif`)
+2. **File Type Validation**: Only allowed extensions (`.pdf`, `.docx`, `.pptx`, `.txt`, `.jpg`, `.jpeg`, `.png`, `.avif`, `.tiff`, `.tif`)
 3. **File Size Limits**: Maximum 50MB per file (configurable)
 4. **API Key Security**: Loaded from environment, never hardcoded
 

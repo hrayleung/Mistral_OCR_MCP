@@ -31,7 +31,8 @@ class Settings:
     # File Processing
     max_file_size: int = 50 * 1024 * 1024  # 50MB in bytes
     allowed_extensions: FrozenSet[str] = frozenset({
-        '.pdf', '.jpg', '.jpeg', '.png', '.avif'
+        '.pdf', '.docx', '.pptx', '.txt',  # Document formats
+        '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'  # Image formats
     })
 
     # Markdown Output Configuration
