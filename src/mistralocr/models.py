@@ -17,6 +17,7 @@ class OCRImage(BaseModel):
     width: int = Field(default=0, description="Image width in pixels")
     height: int = Field(default=0, description="Image height in pixels")
     image_base64: Optional[str] = Field(default=None, description="Base64 image data")
+    image_path: Optional[str] = Field(default=None, description="Saved image path (for markdown linking)")
 
 
 class OCRPage(BaseModel):
@@ -33,13 +34,16 @@ class OCRResult(BaseModel):
     file_path: str = Field(description="Source identifier")
     file_type: str = Field(description="File type: pdf, document, or image")
     source_type: str = Field(default="local_file", description="Source type")
+    from_cache: bool = Field(default=False, description="Whether the result came from cache")
     total_pages: int = Field(description="Total pages processed")
     pages: List[OCRPage] = Field(description="Page results")
     images: List[OCRImage] = Field(default=[], description="Extracted images/figures/charts")
     total_images: int = Field(default=0, description="Total images found")
     model: Optional[str] = Field(default=None, description="OCR model used")
+    usage: dict = Field(default_factory=dict, description="API usage metadata")
     markdown_path: Optional[str] = Field(default=None, description="Saved markdown path")
     error_message: Optional[str] = Field(default=None, description="Error message")
+    error_type: Optional[str] = Field(default=None, description="Error type")
 
 
 class BatchOCRResult(BaseModel):

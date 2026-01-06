@@ -2,6 +2,7 @@
 Mistral OCR API client wrapper with connection pooling.
 """
 
+import time
 from typing import Any, Optional
 from mistralai import Mistral
 from mistralai.models import OCRResponse
@@ -16,17 +17,55 @@ class MistralOCRClient:
         self,
         api_key: str,
         model: str = "mistral-ocr-latest",
-        cache: Optional[OCRCache] = None
+        cache: Optional[OCRCache] = None,
+        api_base: Optional[str] = None,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.5,
     ):
-        self.client = Mistral(api_key=api_key)
+        self.client = self._create_client(api_key=api_key, api_base=api_base)
         self.model = model
         self.cache = cache
+        self.max_retries = max_retries
+        self.retry_backoff_seconds = retry_backoff_seconds
+
+    @staticmethod
+    def _create_client(api_key: str, api_base: Optional[str]) -> Mistral:
+        if not api_base:
+            return Mistral(api_key=api_key)
+        try:
+            return Mistral(api_key=api_key, server_url=api_base)
+        except TypeError:
+            return Mistral(api_key=api_key)
+
+    def _cache_namespace(self, mime_type: str, image_min_size: int) -> str:
+        return f"v2|model={self.model}|mime={mime_type}|image_min_size={image_min_size}"
+
+    def _is_retryable(self, error: Exception) -> bool:
+        msg = str(error).lower()
+        return any(
+            token in msg
+            for token in (
+                "timeout",
+                "timed out",
+                "429",
+                "rate limit",
+                "quota",
+                "temporarily",
+                "503",
+                "502",
+                "bad gateway",
+                "service unavailable",
+                "gateway timeout",
+            )
+        )
 
     def process_document(
         self,
         base64_data: str,
         mime_type: str,
         include_images: bool = False,
+        save_images: bool = False,
+        bypass_cache: bool = False,
         image_limit: Optional[int] = None,
         image_min_size: int = 100
     ) -> dict[str, Any]:
@@ -43,9 +82,9 @@ class MistralOCRClient:
         Returns:
             Dict with success, pages, images, model, usage, error
         """
-        # Check cache (only for non-image requests)
-        if self.cache and not include_images:
-            cached = self.cache.get(base64_data)
+        cache_allowed = self.cache is not None and not include_images and not save_images and not bypass_cache
+        if cache_allowed:
+            cached = self.cache.get(base64_data, namespace=self._cache_namespace(mime_type, image_min_size))
             if cached:
                 cached['_from_cache'] = True
                 return cached
@@ -59,13 +98,24 @@ class MistralOCRClient:
                 else {"type": doc_type, "document_url": data_uri}
             )
 
-            # Always request image base64 to get full image data
-            # The include_images flag controls whether we return it to the user
-            response: OCRResponse = self.client.ocr.process(
-                model=self.model,
-                document=document,
-                include_image_base64=True  # Always get images from API
-            )
+            response: Optional[OCRResponse] = None
+            last_error: Optional[Exception] = None
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = self.client.ocr.process(
+                        model=self.model,
+                        document=document,
+                        include_image_base64=bool(include_images or save_images),
+                    )
+                    break
+                except Exception as e:
+                    last_error = e
+                    if attempt >= self.max_retries or not self._is_retryable(e):
+                        raise
+                    time.sleep(self.retry_backoff_seconds * (2**attempt))
+
+            if response is None:
+                raise RuntimeError(f"OCR request failed: {last_error}")
 
             pages, images = [], []
             image_count = 0
@@ -111,8 +161,8 @@ class MistralOCRClient:
                             'image_base64': None
                         }
 
-                        # Include base64 data if requested
-                        if include_images and hasattr(img, 'image_base64') and img.image_base64:
+                        # Include base64 data if requested (for response or for saving to disk)
+                        if (include_images or save_images) and hasattr(img, 'image_base64') and img.image_base64:
                             img_data['image_base64'] = img.image_base64
 
                         images.append(img_data)
@@ -128,19 +178,24 @@ class MistralOCRClient:
                 'total_images': image_count,
                 'model': response.model,
                 'usage': {
-                    'pages_processed': response.usage_info.pages_processed,
-                    'doc_size_bytes': response.usage_info.doc_size_bytes
+                    'pages_processed': getattr(getattr(response, "usage_info", None), "pages_processed", None),
+                    'doc_size_bytes': getattr(getattr(response, "usage_info", None), "doc_size_bytes", None),
                 },
                 'error': None,
+                'error_type': None,
                 '_from_cache': False
             }
 
             # Cache successful results (without image base64)
-            if self.cache and not include_images:
+            if cache_allowed:
                 cache_result = {**result}
                 for img in cache_result['images']:
                     img['image_base64'] = None
-                self.cache.set(base64_data, cache_result)
+                self.cache.set(
+                    base64_data,
+                    cache_result,
+                    namespace=self._cache_namespace(mime_type, image_min_size),
+                )
 
             return result
 
@@ -163,5 +218,6 @@ class MistralOCRClient:
                 'model': self.model,
                 'usage': {},
                 'error': f'{error_type}: {e}',
+                'error_type': error_type,
                 '_from_cache': False
             }

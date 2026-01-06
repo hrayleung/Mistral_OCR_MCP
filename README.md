@@ -5,9 +5,11 @@ A Model Context Protocol (MCP) server that provides PDF and document OCR capabil
 ## Features
 
 - **Single File OCR**: Process PDFs, Word docs, PowerPoint, text files, and images (JPG, PNG, AVIF, TIFF)
-- **Batch Processing**: Process multiple files sequentially with error recovery
+- **Batch Processing**: Process multiple files concurrently with per-file error recovery
 - **Structured Output**: Returns JSON with page numbers, text, dimensions, and image coordinates
 - **Automatic Markdown Export**: Saves OCR results as formatted markdown files with rich metadata
+- **Optional Image Export**: Saves extracted images to disk and links/embeds them in markdown
+- **On-Disk Caching**: Reuses OCR results for repeated documents to reduce latency/cost
 - **Secure File Handling**: Path traversal prevention, file type validation, and size limits
 - **Progress Reporting**: Real-time feedback during document processing
 
@@ -15,7 +17,7 @@ A Model Context Protocol (MCP) server that provides PDF and document OCR capabil
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.9+
 - Conda environment `deep-learning` (or any Python environment)
 - Mistral API key ([Get one here](https://console.mistral.ai/))
 
@@ -75,8 +77,12 @@ A Model Context Protocol (MCP) server that provides PDF and document OCR capabil
    | `MAX_FILE_SIZE_MB` | No | `50` | Maximum file size in MB |
    | `OCR_CACHE_ENABLED` | No | `true` | Enable result caching |
    | `OCR_CACHE_TTL_HOURS` | No | `168` | Cache TTL (168 = 7 days) |
+   | `OCR_CACHE_DIR` | No | `<OCR_OUTPUT_DIR>/.cache` | Override cache directory |
    | `OCR_IMAGE_MIN_SIZE` | No | `100` | Min image dimension to extract |
    | `OCR_MAX_CONCURRENT` | No | `5` | Max concurrent batch requests |
+   | `OCR_URL_TIMEOUT_SECONDS` | No | `30` | URL download timeout |
+   | `OCR_URL_MAX_REDIRECTS` | No | `3` | Max URL redirects to follow |
+   | `OCR_URL_ALLOW_NONSTANDARD_PORTS` | No | `false` | Allow URL ports other than 80/443 |
 
    **For local testing only (optional):**
    ```bash
@@ -126,11 +132,18 @@ Test the server with MCP Inspector (requires `.env` file):
 
 ### `ocr_process_file`
 
-Process a single file (PDF or image) with OCR.
+Process a single file or URL with OCR.
 
 **Parameters:**
-- `file_path` (string, required): Absolute path to the file
-- `include_images` (boolean, optional): Include base64-encoded images (default: false)
+- `file_path` (string, optional): Absolute path to a local file (mutually exclusive with `url`)
+- `url` (string, optional): Public HTTP(S) URL (mutually exclusive with `file_path`)
+- `include_images` (boolean, optional): Include base64-encoded images in the JSON response (default: false)
+- `save_images` (boolean, optional): Save extracted images to disk and link them in markdown (default: false)
+- `save_markdown` (boolean, optional): Save a markdown file to `OCR_OUTPUT_DIR` (default: true)
+- `image_min_size` (int, optional): Filter out small images (default: `OCR_IMAGE_MIN_SIZE`)
+- `image_limit` (int, optional): Max images to include/save (default: unlimited)
+- `bypass_cache` (boolean, optional): Skip reading/writing the on-disk cache (default: false)
+- `output_dir` (string, optional): Override output directory for this call (default: `OCR_OUTPUT_DIR`)
 
 **Returns:**
 ```json
@@ -138,6 +151,7 @@ Process a single file (PDF or image) with OCR.
   "success": true,
   "file_path": "/path/to/document.pdf",
   "file_type": "pdf",
+  "from_cache": false,
   "total_pages": 5,
   "pages": [
     {
@@ -152,8 +166,10 @@ Process a single file (PDF or image) with OCR.
   ],
   "images": [],
   "model": "mistral-ocr-latest",
-  "markdown_path": "/path/to/OCR_Results/document_20250103_143022.md",
-  "error_message": null
+  "usage": {},
+  "markdown_path": "/path/to/OCR_Results/document_20250103_143022_ab12cd34.md",
+  "error_message": null,
+  "error_type": null
 }
 ```
 
@@ -162,8 +178,15 @@ Process a single file (PDF or image) with OCR.
 Process multiple files with OCR in batch.
 
 **Parameters:**
-- `file_paths` (array of strings, required): List of absolute file paths
-- `include_images` (boolean, optional): Include base64-encoded images (default: false)
+- `sources` (array of strings, required): List of file paths or HTTP(S) URLs (auto-detected)
+- `include_images` (boolean, optional): Include base64-encoded images in the JSON response (default: false)
+- `save_images` (boolean, optional): Save extracted images to disk and link them in markdown (default: false)
+- `save_markdown` (boolean, optional): Save markdown files for successful results (default: true)
+- `image_min_size` (int, optional): Filter out small images (default: `OCR_IMAGE_MIN_SIZE`)
+- `image_limit` (int, optional): Max images to include/save per document (default: unlimited)
+- `bypass_cache` (boolean, optional): Skip reading/writing the on-disk cache (default: false)
+- `max_concurrent` (int, optional): Max concurrent OCR requests (default: `OCR_MAX_CONCURRENT`)
+- `output_dir` (string, optional): Override output directory for this call (default: `OCR_OUTPUT_DIR`)
 
 **Returns:**
 ```json
@@ -192,9 +215,15 @@ Get supported file formats and configuration limits.
 }
 ```
 
+### Cache Tools
+
+- `ocr_clear_cache`: Deletes all cache entries
+- `ocr_cache_stats`: Returns cache size + entry count
+- `ocr_cache_prune`: Deletes expired entries based on TTL
+
 ## Markdown Output
 
-The server automatically saves all OCR results as markdown files for easy reuse and reference. This feature is always enabled when `OCR_OUTPUT_DIR` is configured.
+By default, the server saves OCR results as markdown files for easy reuse and reference (set `save_markdown=false` to disable per call). If `save_images=true`, extracted images are saved to an `_assets` folder next to the markdown file and embedded/linked in the markdown.
 
 ### Configuration
 
@@ -213,10 +242,10 @@ The directory will be created automatically if it doesn't exist.
 
 Files are named automatically to prevent conflicts:
 
-- **Single files**: `{basename}_{timestamp}.md`
-  - Example: `document_20250103_143022.md`
+- **Single files**: `{basename}_{timestamp}_{uid}.md`
+  - Example: `document_20250103_143022_ab12cd34.md`
 - **Batch processing**: `{batch_name}_{idx}_{basename}.md`
-  - Example: `batch_20250103_143022_00_document.pdf`
+  - Example: `batch_20250103_143022_00_document_20250103_143022_ab12cd34.md`
 
 Timestamp format: `YYYYMMDD_HHMMSS`
 
@@ -296,6 +325,8 @@ All tools return structured JSON with error information:
 - `QuotaExceededError`: API quota exceeded
 - `TimeoutError`: Request timeout
 - `APIError`: Other API errors
+- `ConfigurationError`: Missing/invalid server configuration
+- `UnhandledError`: Unexpected internal error
 
 ## Security
 

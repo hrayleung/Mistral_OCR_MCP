@@ -9,6 +9,7 @@ Usage:
 """
 
 import sys
+import logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -16,6 +17,18 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from mcp.server.fastmcp import FastMCP
 from src.mistralocr.config import settings
 from src.mistralocr.tools import register_ocr_tools
+
+def _configure_logging() -> None:
+    level_name = (settings.log_level if settings else "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+_configure_logging()
 
 mcp = FastMCP(
     name=settings.server_name if settings else "MistralOCR",

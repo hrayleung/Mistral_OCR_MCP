@@ -8,6 +8,7 @@ import logging
 import socket
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 from urllib.parse import urlparse, ParseResult
 
 import httpx
@@ -40,12 +41,15 @@ class URLSource(DocumentSource):
 
     TIMEOUT = 30
     ALLOWED_SCHEMES = {'http', 'https'}
+    REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
     def __init__(self, max_file_size: Optional[int] = None, timeout: int = TIMEOUT):
         self.max_file_size = max_file_size or (
             settings.max_file_size if settings else DEFAULT_MAX_FILE_SIZE_BYTES
         )
-        self.timeout = timeout
+        self.timeout = settings.url_timeout_seconds if settings else timeout
+        self.max_redirects = settings.url_max_redirects if settings else 3
+        self.allow_nonstandard_ports = settings.url_allow_nonstandard_ports if settings else False
         self._allowed = settings.allowed_extensions if settings else ALLOWED_EXTENSIONS
         self._client: Optional[httpx.Client] = None
 
@@ -62,15 +66,7 @@ class URLSource(DocumentSource):
     def validate_and_encode(self, url: str) -> ValidationResult:
         """Validate URL and encode content to base64."""
         try:
-            parsed = self._validate_url(url)
-            content_len, _ = self._head_request(parsed.geturl())
-
-            if content_len and content_len > self.max_file_size:
-                return ValidationResult.failure(
-                    f'Content too large: {content_len / 1024 / 1024:.1f}MB'
-                )
-
-            data, content_type = self._download(parsed.geturl())
+            data, content_type, parsed = self._download_following_redirects(url)
 
             if len(data) > self.max_file_size:
                 return ValidationResult.failure(
@@ -120,13 +116,16 @@ class URLSource(DocumentSource):
         parsed = urlparse(url)
         if parsed.scheme not in self.ALLOWED_SCHEMES:
             raise ValueError(f'Invalid scheme: {parsed.scheme}')
-        if not parsed.netloc:
+        if parsed.username or parsed.password:
+            raise ValueError("Userinfo not allowed in URL")
+        if not parsed.hostname:
             raise ValueError('Missing domain')
-        self._check_hostname(parsed.netloc)
+        if parsed.port and parsed.port not in (80, 443) and not self.allow_nonstandard_ports:
+            raise ValueError(f"Non-standard port blocked: {parsed.port}")
+        self._check_hostname(parsed.hostname)
         return parsed
 
-    def _check_hostname(self, netloc: str) -> None:
-        hostname = netloc.split('@')[-1].split(':')[0].strip('[]')
+    def _check_hostname(self, hostname: str) -> None:
         try:
             ip = ipaddress.ip_address(hostname)
             self._check_ip(ip)
@@ -137,24 +136,47 @@ class URLSource(DocumentSource):
         try:
             for _, _, _, _, sockaddr in socket.getaddrinfo(hostname, None):
                 self._check_ip(ipaddress.ip_address(sockaddr[0]))
-        except socket.gaierror:
-            pass
+        except socket.gaierror as e:
+            raise ValueError(f"DNS resolution failed for {hostname}: {e}")
 
     def _check_ip(self, ip) -> None:
         for blocked in BLOCKED_IP_RANGES:
             if ip.version == blocked.version and ip in blocked:
                 raise ValueError(f'Internal address blocked: {ip}')
 
-    def _head_request(self, url: str) -> tuple[Optional[int], Optional[str]]:
-        resp = self.client.head(url)
-        resp.raise_for_status()
-        length = resp.headers.get('content-length')
-        return int(length) if length else None, resp.headers.get('content-type', '')
+    def _download_following_redirects(self, url: str) -> tuple[bytes, str, ParseResult]:
+        current = url
+        for hop in range(self.max_redirects + 1):
+            parsed = self._validate_url(current)
+            with self.client.stream("GET", parsed.geturl()) as resp:
+                if resp.status_code in self.REDIRECT_STATUSES:
+                    if hop >= self.max_redirects:
+                        raise ValueError("Too many redirects")
+                    location = resp.headers.get("location")
+                    if not location:
+                        raise ValueError("Redirect missing Location header")
+                    current = urljoin(current, location)
+                    continue
 
-    def _download(self, url: str) -> tuple[bytes, str]:
-        resp = self.client.get(url)
-        resp.raise_for_status()
-        return resp.content, resp.headers.get('content-type', '').split(';')[0]
+                resp.raise_for_status()
+                content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+                length = resp.headers.get("content-length")
+                if length:
+                    try:
+                        content_len = int(length)
+                    except ValueError:
+                        content_len = None
+                    if content_len and content_len > self.max_file_size:
+                        raise ValueError(f"Content too large: {content_len / 1024 / 1024:.1f}MB")
+
+                buf = bytearray()
+                for chunk in resp.iter_bytes():
+                    buf.extend(chunk)
+                    if len(buf) > self.max_file_size:
+                        raise ValueError(f"Content too large: {len(buf) / 1024 / 1024:.1f}MB")
+                return bytes(buf), content_type, parsed
+
+        raise ValueError("Too many redirects")
 
     def _resolve_mime(self, content_type: str, parsed: ParseResult) -> str:
         if content_type and content_type.startswith(('application/', 'image/', 'text/')):

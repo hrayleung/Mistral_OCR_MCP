@@ -37,10 +37,16 @@ class Settings:
     # Cache settings
     cache_enabled: bool = True
     cache_ttl_hours: int = 168  # 7 days
+    cache_dir: Optional[str] = None
 
     # Image extraction settings
     image_min_size: int = 100  # Min dimension to include images
     max_concurrent: int = 5    # Max concurrent batch requests
+
+    # URL fetching settings
+    url_timeout_seconds: int = 30
+    url_max_redirects: int = 3
+    url_allow_nonstandard_ports: bool = False
 
     @classmethod
     def from_env(cls) -> Optional["Settings"]:
@@ -62,8 +68,13 @@ class Settings:
             output_dir=str(Path(output_dir).resolve()),
             cache_enabled=os.getenv("OCR_CACHE_ENABLED", "true").lower() == "true",
             cache_ttl_hours=int(os.getenv("OCR_CACHE_TTL_HOURS", "168")),
+            cache_dir=os.getenv("OCR_CACHE_DIR"),
             image_min_size=int(os.getenv("OCR_IMAGE_MIN_SIZE", "100")),
             max_concurrent=int(os.getenv("OCR_MAX_CONCURRENT", "5")),
+            url_timeout_seconds=int(os.getenv("OCR_URL_TIMEOUT_SECONDS", "30")),
+            url_max_redirects=int(os.getenv("OCR_URL_MAX_REDIRECTS", "3")),
+            url_allow_nonstandard_ports=os.getenv("OCR_URL_ALLOW_NONSTANDARD_PORTS", "false").lower()
+            == "true",
         )
 
 

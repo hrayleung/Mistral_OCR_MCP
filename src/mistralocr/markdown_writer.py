@@ -31,7 +31,10 @@ class MarkdownWriter:
         self._ensure_dir()
 
     def write_ocr_result(
-        self, ocr_result: Dict, base_filename: Optional[str] = None
+        self,
+        ocr_result: Dict,
+        base_filename: Optional[str] = None,
+        output_path: Optional[str] = None,
     ) -> MarkdownWriteResult:
         """Write single OCR result to markdown."""
         try:
@@ -40,7 +43,7 @@ class MarkdownWriter:
                 return MarkdownWriteResult(False, error=f"Missing: {missing}")
 
             base = base_filename or self._derive_filename(ocr_result['file_path'])
-            path = self._generate_path(base)
+            path = Path(output_path).resolve() if output_path else self._generate_path(base)
             content = self._format(ocr_result, datetime.now())
             path.write_text(content, encoding='utf-8')
 
@@ -63,10 +66,20 @@ class MarkdownWriter:
     def _ensure_dir(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def derive_filename(self, file_path: str) -> str:
+        return self._derive_filename(file_path)
+
     def _derive_filename(self, file_path: str) -> str:
         if file_path.startswith(('http://', 'https://')):
             return sanitize_filename(extract_filename_from_url(file_path), file_path)
         return sanitize_filename(Path(file_path).stem, file_path)
+
+    def reserve_path(self, base: str) -> Path:
+        """Reserve a deterministic output path for a given base name."""
+        return self._generate_path(base)
+
+    def assets_dir_for_markdown(self, markdown_path: Path) -> Path:
+        return markdown_path.parent / f"{markdown_path.stem}_assets"
 
     def _generate_path(self, base: str) -> Path:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -157,6 +170,7 @@ class MarkdownWriter:
                     height = img.get('height', 0)
                     x1, y1 = img.get('top_left_x', 0), img.get('top_left_y', 0)
                     x2, y2 = img.get('bottom_right_x', 0), img.get('bottom_right_y', 0)
+                    image_path = img.get('image_path')
 
                     lines.extend([
                         f"#### {img_id}", "",
@@ -164,9 +178,15 @@ class MarkdownWriter:
                         f"- **Position**: ({x1}, {y1}) to ({x2}, {y2})",
                     ])
 
+                    if image_path:
+                        lines.append(f"- **File**: {image_path}")
+
                     # If base64 data available, note it
                     if img.get('image_base64'):
                         lines.append(f"- **Data**: Base64 encoded ({len(img['image_base64'])} chars)")
+
+                    if image_path:
+                        lines.extend(["", f"![{img_id}]({image_path})"])
 
                     lines.append("")
 
