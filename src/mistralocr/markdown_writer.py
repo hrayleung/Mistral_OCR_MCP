@@ -1,16 +1,12 @@
 """
 Markdown file writer for OCR results.
-
-Handles formatting and persistence of OCR results to markdown files
-with rich metadata and conflict resolution via timestamps.
 """
 
 import logging
-import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -21,384 +17,158 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MarkdownWriteResult:
-    """Result of markdown file write operation."""
+    """Result of markdown write operation."""
     success: bool
     file_path: Optional[str] = None
     error: Optional[str] = None
 
 
-@dataclass
-class MarkdownFormatConfig:
-    """Configuration for markdown formatting."""
-    include_metadata: bool = True
-    include_page_headers: bool = True
-    include_dimensions: bool = True
-    include_image_metadata: bool = True
-    include_toc: bool = True
-    timestamp_format: str = "%Y%m%d_%H%M%S"
-
-
 class MarkdownWriter:
-    """
-    Writes OCR results to markdown files with rich formatting.
+    """Writes OCR results to markdown files."""
 
-    Features:
-    - Automatic conflict resolution via timestamps
-    - Rich metadata (page headers, dimensions, model info)
-    - Batch processing with separate files
-    - Configurable output directory
-    - Graceful error handling
-    """
-
-    def __init__(
-        self,
-        output_dir: str,
-        config: Optional[MarkdownFormatConfig] = None
-    ):
-        """
-        Initialize MarkdownWriter.
-
-        Args:
-            output_dir: Directory path for markdown files (created if missing)
-            config: Formatting configuration (uses defaults if None)
-
-        Raises:
-            ValueError: If output_dir is invalid or cannot be created
-        """
+    def __init__(self, output_dir: str):
         self.output_dir = Path(output_dir).resolve()
-        self.config = config or MarkdownFormatConfig()
-
-        # Validate output directory is within safe bounds (user's home directory)
-        user_home = Path.home()
-        try:
-            self.output_dir.relative_to(user_home)
-        except ValueError:
-            raise ValueError(
-                f"Output directory must be within user home directory: {user_home}"
-            )
-
-        # Ensure output directory exists
-        self._ensure_output_directory()
+        self._ensure_dir()
 
     def write_ocr_result(
-        self,
-        ocr_result: Dict,
-        base_filename: Optional[str] = None
+        self, ocr_result: Dict, base_filename: Optional[str] = None
     ) -> MarkdownWriteResult:
-        """
-        Write a single OCR result to markdown file.
-
-        Args:
-            ocr_result: OCR result dictionary (from MistralOCRClient or OCRResult model)
-            base_filename: Base filename without extension (derived from source if None)
-
-        Returns:
-            MarkdownWriteResult with success status and file path
-        """
+        """Write single OCR result to markdown."""
         try:
-            # Validate required fields
-            required_fields = ['file_path', 'file_type', 'model', 'pages', 'images']
-            for field in required_fields:
-                if field not in ocr_result:
-                    return MarkdownWriteResult(
-                        success=False,
-                        file_path=None,
-                        error=f"Missing required field: {field}"
-                    )
+            required = ['file_path', 'file_type', 'model', 'pages', 'images']
+            if missing := [f for f in required if f not in ocr_result]:
+                return MarkdownWriteResult(False, error=f"Missing: {missing}")
 
-            # Extract metadata
-            file_path = ocr_result.get('file_path', 'unknown')
-            file_type = ocr_result.get('file_type', 'unknown')
-            model = ocr_result.get('model', 'unknown')
-            pages = ocr_result.get('pages', [])
-            images = ocr_result.get('images', [])
+            base = base_filename or self._derive_filename(ocr_result['file_path'])
+            path = self._generate_path(base)
+            content = self._format(ocr_result, datetime.now())
+            path.write_text(content, encoding='utf-8')
 
-            # Generate base filename from source if not provided
-            if base_filename is None:
-                base_filename = self._derive_base_filename(file_path)
-
-            # Generate conflict-free filename
-            target_path = self._generate_filepath(base_filename)
-
-            # Format markdown content
-            markdown_content = self._format_markdown(
-                source_file=file_path,
-                file_type=file_type,
-                model=model,
-                pages=pages,
-                images=images,
-                timestamp=datetime.now()
-            )
-
-            # Write to file
-            target_path.write_text(markdown_content, encoding='utf-8')
-
-            return MarkdownWriteResult(
-                success=True,
-                file_path=str(target_path),
-                error=None
-            )
-
-        except PermissionError:
-            logger.error(f"Permission denied writing to {self.output_dir}", exc_info=True)
-            return MarkdownWriteResult(
-                success=False,
-                file_path=None,
-                error="Permission denied writing to output directory"
-            )
+            return MarkdownWriteResult(True, str(path))
         except Exception as e:
-            logger.error(f"Failed to write markdown: {str(e)}", exc_info=True)
-            return MarkdownWriteResult(
-                success=False,
-                file_path=None,
-                error="Failed to write markdown file. Check logs for details."
-            )
+            logger.exception("Failed to write markdown")
+            return MarkdownWriteResult(False, error=str(e))
 
     def write_batch_results(
-        self,
-        batch_results: List[Dict],
-        batch_name: Optional[str] = None
+        self, batch_results: List[Dict], batch_name: Optional[str] = None
     ) -> Dict[str, MarkdownWriteResult]:
-        """
-        Write multiple OCR results to separate markdown files.
+        """Write multiple OCR results."""
+        results = {}
+        for idx, result in enumerate(batch_results):
+            source = result.get('file_path', f'file_{idx}')
+            base = f"{batch_name}_{idx:02d}_{self._derive_filename(source)}" if batch_name else None
+            results[source] = self.write_ocr_result(result, base)
+        return results
 
-        Args:
-            batch_results: List of OCR result dictionaries
-            batch_name: Optional batch identifier for grouping
+    def _ensure_dir(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        Returns:
-            Dictionary mapping source file paths to write results
-        """
-        write_results = {}
-
-        for idx, ocr_result in enumerate(batch_results):
-            source_file = ocr_result.get('file_path', f'file_{idx}')
-
-            # Generate unique filename for batch
-            if batch_name:
-                base_filename = f"{batch_name}_{idx:02d}_{self._derive_base_filename(source_file)}"
-            else:
-                base_filename = f"{idx:02d}_{self._derive_base_filename(source_file)}"
-
-            write_results[source_file] = self.write_ocr_result(
-                ocr_result=ocr_result,
-                base_filename=base_filename
-            )
-
-        return write_results
-
-    # ========================================================================
-    # Private Methods - File Management
-    # ========================================================================
-
-    def _ensure_output_directory(self) -> None:
-        """Create output directory if it doesn't exist."""
-        try:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            raise ValueError(
-                f"Cannot create output directory {self.output_dir}: {str(e)}"
-            )
-
-    def _derive_base_filename(self, file_path: str) -> str:
-        """
-        Extract base filename from source file path or URL.
-
-        Args:
-            file_path: Source file path or URL
-
-        Returns:
-            Base filename without extension
-            (e.g., "document" from "/path/to/document.pdf" or "https://example.com/document.pdf")
-        """
-        # Handle URLs differently
+    def _derive_filename(self, file_path: str) -> str:
         if file_path.startswith(('http://', 'https://')):
-            stem = extract_filename_from_url(file_path)
+            return sanitize_filename(extract_filename_from_url(file_path), file_path)
+        return sanitize_filename(Path(file_path).stem, file_path)
+
+    def _generate_path(self, base: str) -> Path:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        uid = uuid.uuid4().hex[:8]
+        return self.output_dir / f"{base}_{ts}_{uid}.md"
+
+    def _format(self, result: Dict, timestamp: datetime) -> str:
+        source = result['file_path']
+        pages = result['pages']
+        images = result['images']
+
+        # Header
+        if source.startswith(('http://', 'https://')):
+            doc_name = Path(urlparse(source).path).name or "document"
         else:
-            # Handle local file paths
-            path = Path(file_path)
-            stem = path.stem
-
-        return sanitize_filename(stem, fallback_hash_source=file_path)
-
-    def _generate_filepath(self, base_filename: str) -> Path:
-        """
-        Generate conflict-free filepath with UUID for guaranteed uniqueness.
-
-        Using UUID ensures no race condition even with concurrent processing.
-
-        Args:
-            base_filename: Base filename without extension
-
-        Returns:
-            Resolved Path object with unique filename
-        """
-        # Use UUID for guaranteed uniqueness (avoids race conditions)
-        unique_id = uuid.uuid4().hex[:8]
-        timestamp = datetime.now().strftime(self.config.timestamp_format)
-        return self.output_dir / f"{base_filename}_{timestamp}_{unique_id}.md"
-
-    # ========================================================================
-    # Private Methods - Markdown Formatting
-    # ========================================================================
-
-    def _format_markdown(
-        self,
-        source_file: str,
-        file_type: str,
-        model: str,
-        pages: List[Dict],
-        images: List[Dict],
-        timestamp: datetime
-    ) -> str:
-        """
-        Format OCR result as markdown document.
-
-        Args:
-            source_file: Original source file path
-            file_type: File type (pdf/image)
-            model: OCR model used
-            pages: List of page results
-            images: List of extracted images
-            timestamp: Processing timestamp
-
-        Returns:
-            Complete markdown document as string
-        """
-        lines = []
-
-        # Document header with YAML frontmatter
-        if self.config.include_metadata:
-            lines.extend(self._format_document_header(
-                source_file, file_type, model, timestamp
-            ))
-
-        # Table of contents (if multiple pages)
-        if len(pages) > 1 and self.config.include_toc:
-            lines.extend(self._format_table_of_contents(pages))
-
-        # Page content
-        for page in pages:
-            lines.extend(self._format_page(page))
-
-        # Image metadata section
-        if images and self.config.include_image_metadata:
-            lines.extend(self._format_image_section(images))
-
-        # Footer
-        if self.config.include_metadata:
-            lines.extend(self._format_footer())
-
-        return '\n'.join(lines)
-
-    def _format_document_header(
-        self,
-        source_file: str,
-        file_type: str,
-        model: str,
-        timestamp: datetime
-    ) -> List[str]:
-        """Format document metadata header with YAML frontmatter."""
-        # Extract display name for title (handle URLs)
-        if source_file.startswith(('http://', 'https://')):
-            parsed = urlparse(source_file)
-            doc_name = Path(parsed.path).name or "document"
-            source_display = source_file  # Use full URL
-        else:
-            doc_name = Path(source_file).name
-            source_display = source_file
+            doc_name = Path(source).name
 
         lines = [
             "---",
-            f"source: {source_display}",
-            f"type: {file_type}",
-            f"model: {model}",
+            f"source: {source}",
+            f"type: {result['file_type']}",
+            f"model: {result['model']}",
             f"processed: {timestamp.isoformat()}",
-            "---",
-            "",
-            f"# Document: {doc_name}",
-            ""
-        ]
-        return lines
-
-    def _format_table_of_contents(self, pages: List[Dict]) -> List[str]:
-        """Format table of contents for multi-page documents."""
-        lines = [
-            "## Table of Contents",
-            ""
+            f"total_images: {len(images)}",
+            "---", "",
+            f"# Document: {doc_name}", ""
         ]
 
-        for page in pages:
-            page_num = page.get('index', 0) + 1
-            # Create anchor-friendly heading
-            lines.append(f"- [Page {page_num}](#page-{page_num})")
+        # Summary
+        if images:
+            lines.extend([
+                f"**Summary:** {len(pages)} pages, {len(images)} figures/charts/images extracted",
+                ""
+            ])
 
-        lines.append("")
-        return lines
-
-    def _format_page(self, page: Dict) -> List[str]:
-        """Format individual page content."""
-        index = page.get('index', 0)
-        markdown = page.get('markdown', '')
-        dimensions = page.get('dimensions')
-
-        lines = []
-
-        # Page header
-        if self.config.include_page_headers:
-            lines.append(f"## Page {index + 1}")
+        # TOC
+        if len(pages) > 1:
+            lines.extend(["## Table of Contents", ""])
+            lines.extend(f"- [Page {p.get('index', 0) + 1}](#page-{p.get('index', 0) + 1})" for p in pages)
+            if images:
+                lines.append("- [Extracted Figures & Images](#extracted-figures--images)")
             lines.append("")
 
-            # Add dimensions if available
-            if dimensions and self.config.include_dimensions:
-                lines.append("*Metadata:*")
-                lines.append(f"- Width: {dimensions.get('width', 'N/A')}")
-                lines.append(f"- Height: {dimensions.get('height', 'N/A')}")
-                lines.append(f"- DPI: {dimensions.get('dpi', 'N/A')}")
+        # Pages
+        for page in pages:
+            idx = page.get('index', 0)
+            lines.extend([f"## Page {idx + 1}", ""])
+            if dims := page.get('dimensions'):
+                lines.extend([
+                    "*Metadata:*",
+                    f"- Width: {dims.get('width', 'N/A')}",
+                    f"- Height: {dims.get('height', 'N/A')}",
+                    f"- DPI: {dims.get('dpi', 'N/A')}", ""
+                ])
+
+            # Note images on this page
+            page_images = page.get('images', [])
+            if page_images:
+                lines.append(f"*Images on this page: {len(page_images)}*")
                 lines.append("")
 
-        # Page content
-        lines.append(markdown)
-        lines.append("")
+            lines.extend([page.get('markdown', ''), ""])
 
-        return lines
+        # Images/Figures section
+        if images:
+            lines.extend([
+                "---", "",
+                "## Extracted Figures & Images", "",
+                f"Total: {len(images)} figures, charts, and images extracted from document.",
+                ""
+            ])
 
-    def _format_image_section(self, images: List[Dict]) -> List[str]:
-        """Format extracted images metadata section."""
-        lines = [
-            "---",
-            "",
-            "## Extracted Images",
-            "",
-            f"Total images found: {len(images)}",
-            ""
-        ]
+            # Group by page
+            images_by_page: Dict[int, List] = {}
+            for img in images:
+                page_idx = img.get('page_index', 0)
+                if page_idx not in images_by_page:
+                    images_by_page[page_idx] = []
+                images_by_page[page_idx].append(img)
 
-        for idx, image in enumerate(images, 1):
-            lines.append(f"### Image {idx}")
-            lines.append("")
-            lines.append(f"- **ID**: `{image.get('id', 'N/A')}`")
+            for page_idx in sorted(images_by_page.keys()):
+                page_imgs = images_by_page[page_idx]
+                lines.extend([f"### Page {page_idx + 1} Images", ""])
 
-            # Validate and format coordinates
-            x1, y1 = image.get('top_left_x', 0), image.get('top_left_y', 0)
-            x2, y2 = image.get('bottom_right_x', 0), image.get('bottom_right_y', 0)
+                for img in page_imgs:
+                    img_id = img.get('id', 'unknown')
+                    width = img.get('width', 0)
+                    height = img.get('height', 0)
+                    x1, y1 = img.get('top_left_x', 0), img.get('top_left_y', 0)
+                    x2, y2 = img.get('bottom_right_x', 0), img.get('bottom_right_y', 0)
 
-            lines.append(f"- **Position**: ({x1}, {y1}) to ({x2}, {y2})")
+                    lines.extend([
+                        f"#### {img_id}", "",
+                        f"- **Size**: {width} × {height} pixels",
+                        f"- **Position**: ({x1}, {y1}) to ({x2}, {y2})",
+                    ])
 
-            # Validate size calculation to prevent negative values
-            width = max(0, x2 - x1)
-            height = max(0, y2 - y1)
-            lines.append(f"- **Size**: {width} × {height} pixels")
-            lines.append("")
+                    # If base64 data available, note it
+                    if img.get('image_base64'):
+                        lines.append(f"- **Data**: Base64 encoded ({len(img['image_base64'])} chars)")
 
-        return lines
+                    lines.append("")
 
-    def _format_footer(self) -> List[str]:
-        """Format document footer."""
-        lines = [
-            "---",
-            "",
-            "*Generated by Mistral OCR MCP Server*",
-            ""
-        ]
-        return lines
+        lines.extend(["---", "", "*Generated by Mistral OCR MCP Server*", ""])
+        return '\n'.join(lines)

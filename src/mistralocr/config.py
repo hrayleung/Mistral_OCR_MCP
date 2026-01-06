@@ -1,8 +1,5 @@
 """
 Configuration management for Mistral OCR MCP Server.
-
-Loads settings from environment variables (typically passed by the client)
-and provides configuration constants for the server.
 """
 
 import os
@@ -11,60 +8,49 @@ from pathlib import Path
 from typing import FrozenSet, Optional
 from dotenv import load_dotenv
 
-# Load environment variables from .env file if present (optional)
+from .constants import ALLOWED_EXTENSIONS, DEFAULT_MAX_FILE_SIZE_BYTES
+
 load_dotenv()
 
 
 @dataclass(frozen=True)
 class Settings:
-    """Application settings loaded from environment variables."""
-
-    # Mistral API Configuration
+    """Immutable application settings."""
+    # Required
     api_key: str
+
+    # API settings
     api_base: str = "https://api.mistral.ai/v1"
     ocr_model: str = "mistral-ocr-latest"
 
-    # Server Configuration
+    # Server settings
     server_name: str = "MistralOCR"
     log_level: str = "INFO"
 
-    # File Processing
-    max_file_size: int = 50 * 1024 * 1024  # 50MB in bytes
-    allowed_extensions: FrozenSet[str] = frozenset({
-        '.pdf', '.docx', '.pptx', '.txt',  # Document formats
-        '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'  # Image formats
-    })
+    # File processing
+    max_file_size: int = DEFAULT_MAX_FILE_SIZE_BYTES
+    allowed_extensions: FrozenSet[str] = ALLOWED_EXTENSIONS
 
-    # Markdown Output Configuration
-    output_dir: str = "./ocr_output"  # Directory to save markdown files
+    # Output settings
+    output_dir: str = "./ocr_output"
+
+    # Cache settings
+    cache_enabled: bool = True
+    cache_ttl_hours: int = 168  # 7 days
+
+    # Image extraction settings
+    image_min_size: int = 100  # Min dimension to include images
+    max_concurrent: int = 5    # Max concurrent batch requests
 
     @classmethod
     def from_env(cls) -> Optional["Settings"]:
-        """
-        Load settings from environment variables.
-
-        The API key is expected to be provided by the MCP client (e.g., Claude Desktop)
-        rather than stored in a .env file.
-
-        Returns:
-            Settings: Configuration instance, or None if API key is not set
-
-        Note:
-            If MISTRAL_API_KEY is not set, returns None. The actual initialization
-            will happen when the client connects and provides the API key.
-        """
+        """Load settings from environment. Returns None if API key missing."""
         api_key = os.getenv("MISTRAL_API_KEY")
         if not api_key:
-            # API key not provided yet - will be set by client
             return None
 
-        # Parse max file size from MB to bytes
         max_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-        max_file_size = max_size_mb * 1024 * 1024
-
-        # Get output directory and resolve to absolute path
         output_dir = os.getenv("OCR_OUTPUT_DIR", "./ocr_output")
-        output_dir = str(Path(output_dir).resolve())
 
         return cls(
             api_key=api_key,
@@ -72,10 +58,13 @@ class Settings:
             ocr_model=os.getenv("MISTRAL_OCR_MODEL", "mistral-ocr-latest"),
             server_name=os.getenv("MCP_SERVER_NAME", "MistralOCR"),
             log_level=os.getenv("MCP_LOG_LEVEL", "INFO"),
-            max_file_size=max_file_size,
-            output_dir=output_dir,
+            max_file_size=max_size_mb * 1024 * 1024,
+            output_dir=str(Path(output_dir).resolve()),
+            cache_enabled=os.getenv("OCR_CACHE_ENABLED", "true").lower() == "true",
+            cache_ttl_hours=int(os.getenv("OCR_CACHE_TTL_HOURS", "168")),
+            image_min_size=int(os.getenv("OCR_IMAGE_MIN_SIZE", "100")),
+            max_concurrent=int(os.getenv("OCR_MAX_CONCURRENT", "5")),
         )
 
 
-# Global settings instance (lazy loaded when client connects)
 settings: Optional[Settings] = Settings.from_env()

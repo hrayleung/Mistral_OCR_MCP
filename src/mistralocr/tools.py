@@ -1,462 +1,279 @@
 """
-MCP tool definitions and Pydantic models for Mistral OCR server.
-
-Defines structured output models and implements MCP tools for
-OCR processing.
+MCP tool definitions for Mistral OCR server with async concurrent processing.
 """
 
+import asyncio
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, Field
 
-from mcp.server.fastmcp import Context
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 from .config import settings
-from .file_handler import FileHandler
+from .constants import ALLOWED_EXTENSIONS, DEFAULT_MAX_FILE_SIZE_MB
+from .models import OCRResult, OCRPage, OCRImage, BatchOCRResult, SupportedFormats
 from .ocr_client import MistralOCRClient
+from .cache import OCRCache
 from .markdown_writer import MarkdownWriter
 from .source_factory import get_source_factory
-from .document_source import DocumentSourceType
+
+_cache: Optional[OCRCache] = None
 
 
-# ============================================================================
-# Pydantic Models for Structured Output
-# ============================================================================
+def get_cache() -> Optional[OCRCache]:
+    global _cache
+    if settings and not settings.cache_enabled:
+        return None
+    if _cache is None:
+        cache_dir = f"{settings.output_dir}/.cache" if settings and settings.output_dir else None
+        ttl = settings.cache_ttl_hours if settings else 168
+        _cache = OCRCache(cache_dir, ttl_hours=ttl)
+    return _cache
 
-class OCRPage(BaseModel):
-    """Single OCR page result."""
-    index: int = Field(description="Page number (0-indexed)")
-    markdown: str = Field(description="Extracted text in markdown format")
-    dimensions: Optional[dict] = Field(
-        default=None,
-        description="Page dimensions (width, height, DPI)"
+
+async def _process_single(
+    source: str,
+    is_url: bool,
+    include_images: bool,
+    image_min_size: int,
+    client: MistralOCRClient,
+    factory
+) -> OCRResult:
+    """Process a single document."""
+    try:
+        descriptor = factory.create_descriptor(
+            file_path=None if is_url else source,
+            url=source if is_url else None
+        )
+    except ValueError as e:
+        return OCRResult(
+            success=False, file_path=source, file_type="unknown",
+            source_type="unknown", total_pages=0, pages=[], error_message=str(e)
+        )
+
+    source_handler = factory.get_source(descriptor)
+    loop = asyncio.get_event_loop()
+
+    # Validate and encode
+    result = await loop.run_in_executor(
+        None, source_handler.validate_and_encode, descriptor.identifier
+    )
+    if not result.success:
+        return OCRResult(
+            success=False, file_path=descriptor.identifier,
+            file_type="unknown", source_type=descriptor.source_type.value,
+            total_pages=0, pages=[], error_message=result.error
+        )
+
+    # OCR processing
+    ocr_result = await loop.run_in_executor(
+        None, lambda: client.process_document(
+            result.data, result.mime_type, include_images, image_min_size=image_min_size
+        )
     )
 
+    if not ocr_result['success']:
+        return OCRResult(
+            success=False, file_path=descriptor.identifier,
+            file_type=source_handler.get_file_type(descriptor.identifier) or "unknown",
+            source_type=descriptor.source_type.value, total_pages=0, pages=[],
+            model=ocr_result['model'], error_message=ocr_result['error']
+        )
 
-class OCRImage(BaseModel):
-    """Embedded image in document."""
-    id: str = Field(description="Image identifier")
-    top_left_x: int = Field(description="Top-left X coordinate")
-    top_left_y: int = Field(description="Top-left Y coordinate")
-    bottom_right_x: int = Field(description="Bottom-right X coordinate")
-    bottom_right_y: int = Field(description="Bottom-right Y coordinate")
-    image_base64: Optional[str] = Field(
-        default=None,
-        description="Base64 encoded image data (if include_images=True)"
+    # Build response
+    pages = [OCRPage(
+        index=p['index'],
+        markdown=p['markdown'],
+        dimensions=p.get('dimensions'),
+        images=p.get('images', [])
+    ) for p in ocr_result['pages']]
+
+    images = [OCRImage(**img) for img in ocr_result['images']]
+
+    return OCRResult(
+        success=True, file_path=descriptor.identifier,
+        file_type=source_handler.get_file_type(descriptor.identifier) or "unknown",
+        source_type=descriptor.source_type.value, total_pages=len(pages),
+        pages=pages, images=images, total_images=ocr_result.get('total_images', len(images)),
+        model=ocr_result['model']
     )
 
-
-class OCRResult(BaseModel):
-    """Complete OCR result for a single file or URL."""
-    success: bool = Field(description="Whether OCR succeeded")
-    file_path: str = Field(description="Source identifier (file path or URL)")
-    file_type: str = Field(description="File type: pdf or image")
-    source_type: str = Field(
-        default="local_file",
-        description="Source type: local_file or url"
-    )
-    total_pages: int = Field(description="Total pages processed")
-    pages: List[OCRPage] = Field(description="Array of page results")
-    images: List[OCRImage] = Field(
-        default=[],
-        description="Extracted images with coordinates"
-    )
-    model: Optional[str] = Field(default=None, description="OCR model used")
-    markdown_path: Optional[str] = Field(
-        default=None,
-        description="Path to saved markdown file (if enabled)"
-    )
-    error_message: Optional[str] = Field(
-        default=None,
-        description="Error message if failed"
-    )
-
-
-class BatchOCRResult(BaseModel):
-    """Batch OCR processing result for multiple files."""
-    total_files: int = Field(description="Total files submitted")
-    successful: int = Field(description="Successfully processed")
-    failed: int = Field(description="Failed processing")
-    results: List[OCRResult] = Field(description="Individual file results")
-    errors: List[str] = Field(
-        default=[],
-        description="List of error messages for failed files"
-    )
-
-
-class SupportedFormats(BaseModel):
-    """Supported file formats response."""
-    formats: List[str] = Field(description="List of supported file extensions")
-    max_file_size_mb: int = Field(description="Maximum file size in MB")
-
-
-# ============================================================================
-# MCP Tool Implementations
-# ============================================================================
 
 def register_ocr_tools(mcp: FastMCP) -> None:
-    """
-    Register all OCR tools with the FastMCP server.
-
-    Args:
-        mcp: FastMCP server instance
-    """
+    """Register all OCR tools with FastMCP server."""
 
     @mcp.tool()
     async def ocr_process_file(
         ctx: Context,
         file_path: Optional[str] = None,
         url: Optional[str] = None,
-        include_images: bool = False
+        include_images: bool = False,
+        image_min_size: int = 100
     ) -> OCRResult:
         """
-        Process a single document (PDF or image) with OCR.
-
-        Supports both local files and publicly accessible URLs.
-        Extracts text and structure from PDF documents and images using
-        Mistral's OCR API. Returns structured results with page-by-page
-        text extraction and metadata.
+        Process a document with OCR, extracting text, figures, charts, and images.
 
         Args:
             file_path: Absolute path to local file (mutually exclusive with url)
             url: Public URL to document (mutually exclusive with file_path)
-            include_images: Whether to include base64-encoded images in output
+            include_images: Include base64-encoded image data in response
+            image_min_size: Minimum image dimension to include (filters small icons)
 
         Returns:
-            OCRResult: Structured OCR results with pages, text, and metadata
+            OCRResult with extracted text, images/figures/charts metadata
         """
-        # Validate mutual exclusivity of parameters
-        if file_path is not None and url is not None:
-            await ctx.error("Cannot specify both file_path and url parameters")
+        if (file_path is None) == (url is None):
             return OCRResult(
-                success=False,
-                file_path="unknown",
-                file_type="unknown",
-                source_type="unknown",
-                total_pages=0,
-                pages=[],
-                images=[],
-                error_message="Cannot specify both 'file_path' and 'url' parameters. "
-                             "Please provide only one source."
+                success=False, file_path="unknown", file_type="unknown",
+                source_type="unknown", total_pages=0, pages=[],
+                error_message="Provide exactly one of 'file_path' or 'url'"
             )
 
-        if file_path is None and url is None:
-            await ctx.error("Must specify either file_path or url parameter")
+        if not settings or not settings.api_key:
             return OCRResult(
-                success=False,
-                file_path="unknown",
-                file_type="unknown",
-                source_type="unknown",
-                total_pages=0,
-                pages=[],
-                images=[],
-                error_message="Must specify either 'file_path' or 'url' parameter."
+                success=False, file_path=file_path or url or "unknown",
+                file_type="unknown", source_type="unknown", total_pages=0,
+                pages=[], error_message="MISTRAL_API_KEY not configured"
             )
 
-        # Create descriptor and source using factory
         factory = get_source_factory()
-        try:
-            descriptor = factory.create_descriptor(file_path=file_path, url=url)
-        except ValueError as e:
-            await ctx.error(f"Invalid source specification: {str(e)}")
-            return OCRResult(
-                success=False,
-                file_path=file_path or url or "unknown",
-                file_type="unknown",
-                source_type="unknown",
-                total_pages=0,
-                pages=[],
-                images=[],
-                error_message=str(e)
-            )
+        client = MistralOCRClient(settings.api_key, settings.ocr_model, get_cache())
 
-        source = factory.get_source(descriptor)
+        source = url or file_path
+        is_url = url is not None
+        min_size = image_min_size if image_min_size else settings.image_min_size
+        await ctx.info(f"Processing: {source}")
 
-        await ctx.info(
-            f"Starting OCR processing for {descriptor.source_type.value}: "
-            f"{descriptor.identifier}"
-        )
+        result = await _process_single(source, is_url, include_images, min_size, client, factory)
 
-        # Step 1: Validate and encode document
-        await ctx.debug(f"Validating {descriptor.source_type.value} and encoding to base64...")
-        validation_result = source.validate_and_encode(descriptor.identifier)
+        if result.total_images > 0:
+            await ctx.info(f"Found {result.total_images} images/figures/charts")
 
-        if not validation_result.success:
-            await ctx.error(f"Document validation failed: {validation_result.error}")
-            return OCRResult(
-                success=False,
-                file_path=descriptor.identifier,
-                file_type="unknown",
-                source_type=descriptor.source_type.value,
-                total_pages=0,
-                pages=[],
-                images=[],
-                error_message=validation_result.error
-            )
-
-        await ctx.info(
-            f"Document validated successfully ({validation_result.size_bytes} bytes)"
-        )
-
-        # Step 2: Check configuration
-        if settings is None or not settings.api_key:
-            await ctx.error("MISTRAL_API_KEY not configured")
-            return OCRResult(
-                success=False,
-                file_path=descriptor.identifier,
-                file_type="unknown",
-                source_type=descriptor.source_type.value,
-                total_pages=0,
-                pages=[],
-                images=[],
-                error_message="MISTRAL_API_KEY environment variable is required. "
-                           "Please configure it in your MCP client settings."
-            )
-
-        # Step 3: Initialize OCR client
-        await ctx.debug("Initializing Mistral OCR client...")
-        ocr_client = MistralOCRClient(
-            api_key=settings.api_key,
-            model=settings.ocr_model
-        )
-
-        # Step 4: Process with Mistral OCR
-        await ctx.info("Sending document to Mistral OCR API...")
-        try:
-            ocr_response = ocr_client.process_document(
-                base64_data=validation_result.data,
-                mime_type=validation_result.mime_type,
-                include_images=include_images
-            )
-        except Exception as e:
-            await ctx.error(f"OCR processing failed: {str(e)}")
-            return OCRResult(
-                success=False,
-                file_path=descriptor.identifier,
-                file_type=source.get_file_type(descriptor.identifier) or "unknown",
-                source_type=descriptor.source_type.value,
-                total_pages=0,
-                pages=[],
-                images=[],
-                error_message=f"OCR processing error: {str(e)}"
-            )
-
-        # Step 5: Check for API errors
-        if not ocr_response['success']:
-            await ctx.error(f"Mistral API error: {ocr_response['error']}")
-            return OCRResult(
-                success=False,
-                file_path=descriptor.identifier,
-                file_type=source.get_file_type(descriptor.identifier) or "unknown",
-                source_type=descriptor.source_type.value,
-                total_pages=0,
-                pages=[],
-                images=[],
-                model=ocr_response['model'],
-                error_message=ocr_response['error']
-            )
-
-        # Step 6: Build success response
-        await ctx.info(
-            f"OCR completed successfully! "
-            f"Processed {len(ocr_response['pages'])} pages"
-        )
-
-        pages = [
-            OCRPage(
-                index=p['index'],
-                markdown=p['markdown'],
-                dimensions=p.get('dimensions')
-            )
-            for p in ocr_response['pages']
-        ]
-
-        images = [
-            OCRImage(**img)
-            for img in ocr_response['images']
-        ]
-
-        # Step 7: Save to markdown file
-        markdown_path = None
-        if settings and settings.output_dir:
-            await ctx.debug("Saving OCR results to markdown file...")
+        # Save markdown
+        if result.success and settings and settings.output_dir:
             try:
-                writer = MarkdownWriter(output_dir=settings.output_dir)
+                writer = MarkdownWriter(settings.output_dir)
                 write_result = writer.write_ocr_result({
-                    'success': True,
-                    'file_path': descriptor.identifier,
-                    'file_type': source.get_file_type(descriptor.identifier) or "unknown",
-                    'total_pages': len(pages),
-                    'pages': ocr_response['pages'],
-                    'images': ocr_response['images'],
-                    'model': ocr_response['model']
+                    'file_path': result.file_path,
+                    'file_type': result.file_type,
+                    'model': result.model,
+                    'pages': [p.model_dump() for p in result.pages],
+                    'images': [i.model_dump() for i in result.images]
                 })
-
                 if write_result.success:
-                    markdown_path = write_result.file_path
-                    await ctx.info(f"✓ Saved markdown to: {markdown_path}")
-                else:
-                    await ctx.error(f"Failed to save markdown: {write_result.error}")
+                    result = OCRResult(**{**result.model_dump(), 'markdown_path': write_result.file_path})
+                    await ctx.info(f"Saved: {write_result.file_path}")
             except Exception as e:
-                await ctx.error(f"Error saving markdown: {str(e)}")
+                await ctx.error(f"Markdown save failed: {e}")
 
-        return OCRResult(
-            success=True,
-            file_path=descriptor.identifier,
-            file_type=source.get_file_type(descriptor.identifier) or "unknown",
-            source_type=descriptor.source_type.value,
-            total_pages=len(pages),
-            pages=pages,
-            images=images,
-            model=ocr_response['model'],
-            markdown_path=markdown_path
-        )
+        return result
 
     @mcp.tool()
     async def ocr_batch_process(
         ctx: Context,
         sources: List[str],
-        include_images: bool = False
+        include_images: bool = False,
+        image_min_size: Optional[int] = None,
+        max_concurrent: Optional[int] = None
     ) -> BatchOCRResult:
         """
-        Process multiple documents (PDFs and images) with OCR in batch.
-
-        Supports mixing local files and URLs in a single batch.
-        Processes multiple documents sequentially, continuing even if individual
-        documents fail. Returns summary statistics and individual results.
+        Process multiple documents with OCR concurrently.
 
         Args:
-            sources: List of source identifiers (file paths or URLs).
-                     URLs are auto-detected by http:// or https:// prefix.
-            include_images: Whether to include base64-encoded images in output
+            sources: List of file paths or URLs (auto-detected)
+            include_images: Include base64-encoded image data
+            image_min_size: Minimum image dimension to include (default from config)
+            max_concurrent: Maximum concurrent OCR requests (default from config)
 
         Returns:
-            BatchOCRResult: Summary with individual results for each document
+            BatchOCRResult with individual results
         """
-        await ctx.info(
-            f"Starting batch OCR processing for {len(sources)} sources "
-            f"(files and URLs)"
-        )
+        if not settings or not settings.api_key:
+            return BatchOCRResult(
+                total_files=len(sources), successful=0, failed=len(sources),
+                results=[], errors=["MISTRAL_API_KEY not configured"]
+            )
+
+        concurrent = max_concurrent if max_concurrent else settings.max_concurrent
+        min_size = image_min_size if image_min_size else settings.image_min_size
+        await ctx.info(f"Batch processing {len(sources)} sources (max {concurrent} concurrent)")
 
         factory = get_source_factory()
+        client = MistralOCRClient(settings.api_key, settings.ocr_model, get_cache())
+        semaphore = asyncio.Semaphore(concurrent)
+
+        async def process_with_semaphore(src: str, idx: int) -> OCRResult:
+            async with semaphore:
+                descriptor = factory.create_descriptor_auto(src)
+                await ctx.info(f"[{idx + 1}/{len(sources)}] {src}")
+                return await _process_single(src, descriptor.is_url, include_images, min_size, client, factory)
+
         try:
-            results = []
-            errors = []
-            successful = 0
-            failed = 0
+            tasks = [process_with_semaphore(src, idx) for idx, src in enumerate(sources)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for idx, source in enumerate(sources, 1):
-                # Auto-detect source type
-                descriptor = factory.create_descriptor_auto(source)
-                source_type_label = "URL" if descriptor.is_url else "file"
+            final_results, errors = [], []
+            successful, failed = 0, 0
 
-                await ctx.info(
-                    f"Processing source {idx}/{len(sources)}: {source} "
-                    f"(detected as {source_type_label})"
-                )
-
-                # Process each source by routing to appropriate handler
-                if descriptor.is_url:
-                    result = await ocr_process_file(
-                        file_path=None,
-                        url=source,
-                        include_images=include_images,
-                        ctx=ctx
-                    )
-                else:
-                    result = await ocr_process_file(
-                        file_path=source,
-                        url=None,
-                        include_images=include_images,
-                        ctx=ctx
-                    )
-
-                results.append(result)
-
-                if result.success:
+            for src, result in zip(sources, results):
+                if isinstance(result, Exception):
+                    failed += 1
+                    errors.append(f"{src}: {result}")
+                    final_results.append(OCRResult(
+                        success=False, file_path=src, file_type="unknown",
+                        source_type="unknown", total_pages=0, pages=[],
+                        error_message=str(result)
+                    ))
+                elif result.success:
                     successful += 1
-                    await ctx.info(f"Success: {source}")
+                    final_results.append(result)
                 else:
                     failed += 1
-                    error_msg = f"{source}: {result.error_message}"
-                    errors.append(error_msg)
-                    await ctx.error(f"Failed: {source} - {result.error_message}")
+                    errors.append(f"{src}: {result.error_message}")
+                    final_results.append(result)
 
-            await ctx.info(
-                f"Batch processing complete: "
-                f"{successful} succeeded, {failed} failed"
-            )
+            await ctx.info(f"Completed: {successful} succeeded, {failed} failed")
 
-            # Step 7: Save batch results to markdown files
-            if settings and settings.output_dir:
-                await ctx.debug("Saving batch OCR results to markdown files...")
+            # Save batch markdown
+            if settings and settings.output_dir and successful > 0:
                 try:
-                    writer = MarkdownWriter(output_dir=settings.output_dir)
+                    writer = MarkdownWriter(settings.output_dir)
                     batch_name = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-                    # Only write successful results
                     successful_results = [
-                        {
-                            'success': True,
-                            'file_path': r.file_path,
-                            'file_type': r.file_type,
-                            'total_pages': r.total_pages,
-                            'pages': [p.model_dump() for p in r.pages],
-                            'images': [img.model_dump() for img in r.images],
-                            'model': r.model
-                        }
-                        for r in results
-                        if r.success
+                        {'file_path': r.file_path, 'file_type': r.file_type, 'model': r.model,
+                         'pages': [p.model_dump() for p in r.pages],
+                         'images': [i.model_dump() for i in r.images]}
+                        for r in final_results if r.success
                     ]
-
-                    write_results = writer.write_batch_results(
-                        batch_results=successful_results,
-                        batch_name=batch_name
-                    )
-
-                    # Log results
-                    saved_count = sum(1 for r in write_results.values() if r.success)
-                    await ctx.info(f"Saved {saved_count} markdown files to {settings.output_dir}")
-
+                    writer.write_batch_results(successful_results, batch_name)
                 except Exception as e:
-                    await ctx.error(f"Error saving batch markdown files: {str(e)}")
+                    await ctx.error(f"Batch markdown save failed: {e}")
 
             return BatchOCRResult(
-                total_files=len(sources),
-                successful=successful,
-                failed=failed,
-                results=results,
-                errors=errors
+                total_files=len(sources), successful=successful, failed=failed,
+                results=final_results, errors=errors
             )
         finally:
-            # Ensure HTTP client is closed after batch processing
             factory.close()
 
     @mcp.tool()
     async def ocr_get_supported_formats(ctx: Context) -> SupportedFormats:
-        """
-        Get the list of supported file formats and configuration limits.
-
-        Returns information about which file types are supported and
-        the maximum file size allowed for OCR processing.
-
-        Returns:
-            SupportedFormats: List of supported formats and size limits
-        """
-        await ctx.debug("Retrieving supported formats information")
-
-        # Use defaults if settings not loaded
-        if settings is None:
+        """Get supported file formats and size limits."""
+        if settings:
             return SupportedFormats(
-                formats=[
-                    '.pdf', '.docx', '.pptx', '.txt',
-                    '.jpg', '.jpeg', '.png', '.avif', '.tiff', '.tif'
-                ],
-                max_file_size_mb=50
+                formats=list(settings.allowed_extensions),
+                max_file_size_mb=settings.max_file_size // (1024 * 1024)
             )
-
         return SupportedFormats(
-            formats=list(settings.allowed_extensions),
-            max_file_size_mb=settings.max_file_size // (1024 * 1024)
+            formats=list(ALLOWED_EXTENSIONS),
+            max_file_size_mb=DEFAULT_MAX_FILE_SIZE_MB
         )
+
+    @mcp.tool()
+    async def ocr_clear_cache(ctx: Context) -> dict:
+        """Clear the OCR results cache."""
+        cache = get_cache()
+        if cache is None:
+            return {"cleared": 0, "message": "Cache is disabled"}
+        count = cache.clear()
+        await ctx.info(f"Cleared {count} cached entries")
+        return {"cleared": count}

@@ -54,21 +54,34 @@ A Model Context Protocol (MCP) server that provides PDF and document OCR capabil
          ],
          "env": {
            "MISTRAL_API_KEY": "your_mistral_api_key_here",
-           "OCR_OUTPUT_DIR": "/Users/hinrayleung/Documents/OCR_Results"
+           "OCR_OUTPUT_DIR": "/Users/hinrayleung/Documents/OCR_Results",
+           "MAX_FILE_SIZE_MB": "50",
+           "OCR_CACHE_ENABLED": "true",
+           "OCR_CACHE_TTL_HOURS": "168",
+           "OCR_IMAGE_MIN_SIZE": "100",
+           "OCR_MAX_CONCURRENT": "5"
          }
        }
      }
    }
    ```
 
-   Replace:
-   - `your_mistral_api_key_here` with your actual Mistral API key
-   - `/Users/hinrayleung/Documents/OCR_Results` with your desired output directory
+   **Environment Variables:**
+
+   | Variable | Required | Default | Description |
+   |----------|----------|---------|-------------|
+   | `MISTRAL_API_KEY` | Yes | - | Your Mistral API key |
+   | `OCR_OUTPUT_DIR` | No | `./ocr_output` | Directory for markdown output |
+   | `MAX_FILE_SIZE_MB` | No | `50` | Maximum file size in MB |
+   | `OCR_CACHE_ENABLED` | No | `true` | Enable result caching |
+   | `OCR_CACHE_TTL_HOURS` | No | `168` | Cache TTL (168 = 7 days) |
+   | `OCR_IMAGE_MIN_SIZE` | No | `100` | Min image dimension to extract |
+   | `OCR_MAX_CONCURRENT` | No | `5` | Max concurrent batch requests |
 
    **For local testing only (optional):**
    ```bash
    cp .env.example .env
-   # Edit .env and uncomment MISTRAL_API_KEY for local testing
+   # Edit .env and set MISTRAL_API_KEY
    ```
 
 ## Usage
@@ -297,19 +310,24 @@ The server implements several security measures:
 
 ```
 mistralocr/
-├── mcp_server.py                # Main server entry point
-├── requirements.txt             # Python dependencies
-├── .env.example                # Environment variables template (for local testing)
-├── claude_desktop_config.json  # Claude Desktop configuration template
-├── README.md                   # This file
-└── src/
-    └── mistralocr/
-        ├── __init__.py       # Package initialization
-        ├── config.py         # Configuration management
-        ├── file_handler.py   # Secure file validation
-        ├── ocr_client.py     # Mistral API wrapper
-        ├── markdown_writer.py # Markdown file output
-        └── tools.py          # MCP tool definitions
+├── mcp_server.py              # Server entry point
+├── requirements.txt           # Dependencies
+├── .env.example              # Environment template
+├── claude_desktop_config.json # Claude Desktop config
+├── README.md
+└── src/mistralocr/
+    ├── __init__.py           # Package exports
+    ├── constants.py          # Extensions, MIME types, limits
+    ├── models.py             # Pydantic response models
+    ├── config.py             # Settings from environment
+    ├── utils.py              # Shared utilities
+    ├── document_source.py    # Abstract source interface
+    ├── file_source.py        # Local file handler
+    ├── url_source.py         # URL handler (SSRF protected)
+    ├── source_factory.py     # Factory for sources
+    ├── ocr_client.py         # Mistral API wrapper
+    ├── markdown_writer.py    # Markdown output
+    └── tools.py              # MCP tool definitions
 ```
 
 ## Example Usage
