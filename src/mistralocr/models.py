@@ -25,7 +25,7 @@ class OCRPage(BaseModel):
     index: int = Field(description="Page number (0-indexed)")
     markdown: str = Field(description="Extracted text in markdown format")
     dimensions: Optional[dict] = Field(default=None, description="Page dimensions")
-    images: List[str] = Field(default=[], description="Image IDs on this page")
+    images: List[str] = Field(default_factory=list, description="Image IDs on this page")
 
 
 class OCRResult(BaseModel):
@@ -37,7 +37,7 @@ class OCRResult(BaseModel):
     from_cache: bool = Field(default=False, description="Whether the result came from cache")
     total_pages: int = Field(description="Total pages processed")
     pages: List[OCRPage] = Field(description="Page results")
-    images: List[OCRImage] = Field(default=[], description="Extracted images/figures/charts")
+    images: List[OCRImage] = Field(default_factory=list, description="Extracted images/figures/charts")
     total_images: int = Field(default=0, description="Total images found")
     model: Optional[str] = Field(default=None, description="OCR model used")
     usage: dict = Field(default_factory=dict, description="API usage metadata")
@@ -52,7 +52,7 @@ class BatchOCRResult(BaseModel):
     successful: int = Field(description="Successfully processed")
     failed: int = Field(description="Failed processing")
     results: List[OCRResult] = Field(description="Individual results")
-    errors: List[str] = Field(default=[], description="Error messages")
+    errors: List[str] = Field(default_factory=list, description="Error messages")
 
 
 class SupportedFormats(BaseModel):

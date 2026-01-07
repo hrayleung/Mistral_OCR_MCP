@@ -5,6 +5,8 @@ Simple file-based cache for OCR results.
 import hashlib
 import json
 import logging
+import os
+import uuid
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
@@ -34,6 +36,7 @@ class OCRCache:
 
     def get(self, base64_data: str, namespace: str = "") -> Optional[dict]:
         """Get cached result if exists and not expired."""
+        cache_file: Optional[Path] = None
         try:
             content_hash = self._hash_content(base64_data, namespace=namespace)
             cache_file = self._cache_path(content_hash)
@@ -55,10 +58,11 @@ class OCRCache:
             logger.info(f"Cache hit: {content_hash}")
             return data.get("result")
         except Exception:
-            try:
-                cache_file.unlink(missing_ok=True)  # type: ignore[name-defined]
-            except Exception:
-                pass
+            if cache_file is not None:
+                try:
+                    cache_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
             return None
 
     def set(self, base64_data: str, result: dict, namespace: str = "") -> None:
@@ -66,16 +70,16 @@ class OCRCache:
         try:
             content_hash = self._hash_content(base64_data, namespace=namespace)
             cache_file = self._cache_path(content_hash)
-            cache_file.write_text(
-                json.dumps(
-                    {
-                        "_cached_at": datetime.now().isoformat(),
-                        "_namespace": namespace,
-                        "result": result,
-                    }
-                ),
-                encoding="utf-8",
+            payload = json.dumps(
+                {
+                    "_cached_at": datetime.now().isoformat(),
+                    "_namespace": namespace,
+                    "result": result,
+                }
             )
+            tmp_file = cache_file.with_name(f"{cache_file.name}.{uuid.uuid4().hex}.tmp")
+            tmp_file.write_text(payload, encoding="utf-8")
+            os.replace(tmp_file, cache_file)
             logger.info(f"Cached: {content_hash}")
         except Exception as e:
             logger.warning(f"Cache write failed: {e}")

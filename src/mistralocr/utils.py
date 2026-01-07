@@ -12,18 +12,25 @@ from .constants import INVALID_FILENAME_CHARS
 
 def sanitize_filename(name: str, fallback_hash_source: Optional[str] = None) -> str:
     """Sanitize filename by removing invalid characters."""
-    if not name or name in ('.', '..'):
+    name = (name or "").strip()
+    if not name or name in (".", ".."):
         if fallback_hash_source:
             return f"unnamed_{hashlib.sha256(fallback_hash_source.encode()).hexdigest()[:12]}"
         return "unnamed"
 
     for char in INVALID_FILENAME_CHARS:
-        name = name.replace(char, '_')
+        name = name.replace(char, "_")
 
-    if not name or name in ('.', '..'):
+    name = name.strip().rstrip(" .")
+    if not name or name in (".", ".."):
         if fallback_hash_source:
             return f"unnamed_{hashlib.sha256(fallback_hash_source.encode()).hexdigest()[:12]}"
         return "unnamed"
+
+    max_len = 150
+    if len(name) > max_len:
+        suffix = hashlib.sha256((fallback_hash_source or name).encode()).hexdigest()[:8]
+        name = f"{name[: max_len - 9]}_{suffix}"
 
     return name
 

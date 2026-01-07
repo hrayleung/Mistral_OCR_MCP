@@ -47,6 +47,12 @@ class ImageWriter:
 
             out_path = self.assets_dir / filename
             try:
+                if out_path.exists():
+                    stem, suffix = out_path.stem, out_path.suffix
+                    counter = 1
+                    while out_path.exists():
+                        out_path = self.assets_dir / f"{stem}_{counter:02d}{suffix}"
+                        counter += 1
                 out_path.write_bytes(base64.b64decode(img_b64))
                 written += 1
                 image_path = str(out_path)

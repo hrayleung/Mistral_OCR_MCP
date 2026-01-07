@@ -2,12 +2,16 @@
 Mistral OCR API client wrapper with connection pooling.
 """
 
+import logging
 import time
 from typing import Any, Optional
+
 from mistralai import Mistral
 from mistralai.models import OCRResponse
 
 from .cache import OCRCache
+
+logger = logging.getLogger(__name__)
 
 
 class MistralOCRClient:
@@ -37,8 +41,9 @@ class MistralOCRClient:
         except TypeError:
             return Mistral(api_key=api_key)
 
-    def _cache_namespace(self, mime_type: str, image_min_size: int) -> str:
-        return f"v2|model={self.model}|mime={mime_type}|image_min_size={image_min_size}"
+    def _cache_namespace(self, mime_type: str, image_min_size: int, image_limit: Optional[int]) -> str:
+        limit_part = "all" if image_limit is None else str(image_limit)
+        return f"v3|model={self.model}|mime={mime_type}|image_min_size={image_min_size}|image_limit={limit_part}"
 
     def _is_retryable(self, error: Exception) -> bool:
         msg = str(error).lower()
@@ -67,7 +72,7 @@ class MistralOCRClient:
         save_images: bool = False,
         bypass_cache: bool = False,
         image_limit: Optional[int] = None,
-        image_min_size: int = 100
+        image_min_size: int = 100,
     ) -> dict[str, Any]:
         """
         Process document with OCR.
@@ -84,14 +89,17 @@ class MistralOCRClient:
         """
         cache_allowed = self.cache is not None and not include_images and not save_images and not bypass_cache
         if cache_allowed:
-            cached = self.cache.get(base64_data, namespace=self._cache_namespace(mime_type, image_min_size))
-            if cached:
-                cached['_from_cache'] = True
+            cached = self.cache.get(
+                base64_data,
+                namespace=self._cache_namespace(mime_type, image_min_size, image_limit),
+            )
+            if isinstance(cached, dict) and cached.get("success") is True:
+                cached["_from_cache"] = True
                 return cached
 
         try:
             data_uri = f"data:{mime_type};base64,{base64_data}"
-            doc_type = "image_url" if mime_type.startswith('image/') else "document_url"
+            doc_type = "image_url" if mime_type.startswith("image/") else "document_url"
             document = (
                 {"type": doc_type, "image_url": {"url": data_uri}}
                 if doc_type == "image_url"
@@ -122,21 +130,21 @@ class MistralOCRClient:
 
             for page in response.pages:
                 page_data = {
-                    'index': page.index,
-                    'markdown': page.markdown,
-                    'dimensions': None,
-                    'images': []  # Per-page images
+                    "index": page.index,
+                    "markdown": page.markdown,
+                    "dimensions": None,
+                    "images": [],  # Per-page images
                 }
 
-                if hasattr(page, 'dimensions') and page.dimensions:
-                    page_data['dimensions'] = {
-                        'width': page.dimensions.width,
-                        'height': page.dimensions.height,
-                        'dpi': getattr(page.dimensions, 'dpi', None)
+                if hasattr(page, "dimensions") and page.dimensions:
+                    page_data["dimensions"] = {
+                        "width": page.dimensions.width,
+                        "height": page.dimensions.height,
+                        "dpi": getattr(page.dimensions, "dpi", None),
                     }
 
                 # Process images for this page
-                if hasattr(page, 'images') and page.images:
+                if hasattr(page, "images") and page.images:
                     for img in page.images:
                         width = abs(img.bottom_right_x - img.top_left_x)
                         height = abs(img.bottom_right_y - img.top_left_y)
@@ -150,74 +158,78 @@ class MistralOCRClient:
                             continue
 
                         img_data = {
-                            'id': img.id,
-                            'page_index': page.index,
-                            'top_left_x': img.top_left_x,
-                            'top_left_y': img.top_left_y,
-                            'bottom_right_x': img.bottom_right_x,
-                            'bottom_right_y': img.bottom_right_y,
-                            'width': width,
-                            'height': height,
-                            'image_base64': None
+                            "id": img.id,
+                            "page_index": page.index,
+                            "top_left_x": img.top_left_x,
+                            "top_left_y": img.top_left_y,
+                            "bottom_right_x": img.bottom_right_x,
+                            "bottom_right_y": img.bottom_right_y,
+                            "width": width,
+                            "height": height,
+                            "image_base64": None,
                         }
 
                         # Include base64 data if requested (for response or for saving to disk)
-                        if (include_images or save_images) and hasattr(img, 'image_base64') and img.image_base64:
-                            img_data['image_base64'] = img.image_base64
+                        if (include_images or save_images) and hasattr(img, "image_base64") and img.image_base64:
+                            img_data["image_base64"] = img.image_base64
 
                         images.append(img_data)
-                        page_data['images'].append(img_data['id'])
+                        page_data["images"].append(img_data["id"])
                         image_count += 1
 
                 pages.append(page_data)
 
             result = {
-                'success': True,
-                'pages': pages,
-                'images': images,
-                'total_images': image_count,
-                'model': response.model,
-                'usage': {
-                    'pages_processed': getattr(getattr(response, "usage_info", None), "pages_processed", None),
-                    'doc_size_bytes': getattr(getattr(response, "usage_info", None), "doc_size_bytes", None),
+                "success": True,
+                "pages": pages,
+                "images": images,
+                "total_images": image_count,
+                "model": response.model,
+                "usage": {
+                    "pages_processed": getattr(getattr(response, "usage_info", None), "pages_processed", None),
+                    "doc_size_bytes": getattr(getattr(response, "usage_info", None), "doc_size_bytes", None),
                 },
-                'error': None,
-                'error_type': None,
-                '_from_cache': False
+                "error": None,
+                "error_type": None,
+                "_from_cache": False,
             }
 
             # Cache successful results (without image base64)
             if cache_allowed:
                 cache_result = {**result}
-                for img in cache_result['images']:
-                    img['image_base64'] = None
+                for img in cache_result["images"]:
+                    img["image_base64"] = None
                 self.cache.set(
                     base64_data,
                     cache_result,
-                    namespace=self._cache_namespace(mime_type, image_min_size),
+                    namespace=self._cache_namespace(mime_type, image_min_size, image_limit),
                 )
 
             return result
 
         except Exception as e:
-            error_msg = str(e).lower()
-            if any(x in error_msg for x in ('authentication', 'unauthorized', '401')):
-                error_type = 'AuthenticationError'
-            elif any(x in error_msg for x in ('quota', 'limit', '429')):
-                error_type = 'QuotaExceededError'
-            elif 'timeout' in error_msg:
-                error_type = 'TimeoutError'
-            else:
-                error_type = 'APIError'
+            error_type = self._classify_error(e)
+            logger.warning("OCR request failed (%s): %s", error_type, e)
 
             return {
-                'success': False,
-                'pages': [],
-                'images': [],
-                'total_images': 0,
-                'model': self.model,
-                'usage': {},
-                'error': f'{error_type}: {e}',
-                'error_type': error_type,
-                '_from_cache': False
+                "success": False,
+                "pages": [],
+                "images": [],
+                "total_images": 0,
+                "model": self.model,
+                "usage": {},
+                "error": f"{error_type}: {e}",
+                "error_type": error_type,
+                "_from_cache": False,
             }
+
+    @staticmethod
+    def _classify_error(error: Exception) -> str:
+        msg = str(error).lower()
+        if any(token in msg for token in ("authentication", "unauthorized", "401")):
+            return "AuthenticationError"
+        if any(token in msg for token in ("quota", "rate limit", "429", "limit")):
+            return "QuotaExceededError"
+        if "timeout" in msg or "timed out" in msg:
+            return "TimeoutError"
+        return "APIError"

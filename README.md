@@ -140,7 +140,7 @@ Process a single file or URL with OCR.
 - `include_images` (boolean, optional): Include base64-encoded images in the JSON response (default: false)
 - `save_images` (boolean, optional): Save extracted images to disk and link them in markdown (default: false)
 - `save_markdown` (boolean, optional): Save a markdown file to `OCR_OUTPUT_DIR` (default: true)
-- `image_min_size` (int, optional): Filter out small images (default: `OCR_IMAGE_MIN_SIZE`)
+- `image_min_size` (int, optional): Filter out small images; when omitted uses `OCR_IMAGE_MIN_SIZE`, when provided overrides it
 - `image_limit` (int, optional): Max images to include/save (default: unlimited)
 - `bypass_cache` (boolean, optional): Skip reading/writing the on-disk cache (default: false)
 - `output_dir` (string, optional): Override output directory for this call (default: `OCR_OUTPUT_DIR`)
@@ -182,7 +182,7 @@ Process multiple files with OCR in batch.
 - `include_images` (boolean, optional): Include base64-encoded images in the JSON response (default: false)
 - `save_images` (boolean, optional): Save extracted images to disk and link them in markdown (default: false)
 - `save_markdown` (boolean, optional): Save markdown files for successful results (default: true)
-- `image_min_size` (int, optional): Filter out small images (default: `OCR_IMAGE_MIN_SIZE`)
+- `image_min_size` (int, optional): Filter out small images; when omitted uses `OCR_IMAGE_MIN_SIZE`, when provided overrides it
 - `image_limit` (int, optional): Max images to include/save per document (default: unlimited)
 - `bypass_cache` (boolean, optional): Skip reading/writing the on-disk cache (default: false)
 - `max_concurrent` (int, optional): Max concurrent OCR requests (default: `OCR_MAX_CONCURRENT`)
@@ -220,6 +220,8 @@ Get supported file formats and configuration limits.
 - `ocr_clear_cache`: Deletes all cache entries
 - `ocr_cache_stats`: Returns cache size + entry count
 - `ocr_cache_prune`: Deletes expired entries based on TTL
+
+Note: Cache entries are keyed by document content plus request options (e.g., model, `image_min_size`, `image_limit`). If you change those settings, older cached entries may remain on disk until pruned/cleared.
 
 ## Markdown Output
 

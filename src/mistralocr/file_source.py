@@ -4,7 +4,6 @@ Local file document source for OCR processing.
 
 import base64
 import mimetypes
-import os
 from pathlib import Path
 from typing import Optional
 

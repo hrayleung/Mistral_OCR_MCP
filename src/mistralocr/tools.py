@@ -28,7 +28,7 @@ def get_cache() -> Optional[OCRCache]:
     if _cache is None:
         cache_dir = None
         if settings:
-            cache_dir = settings.cache_dir or (f"{settings.output_dir}/.cache" if settings.output_dir else None)
+            cache_dir = settings.cache_dir or str(Path(settings.output_dir) / ".cache")
         ttl = settings.cache_ttl_hours if settings else 168
         _cache = OCRCache(cache_dir, ttl_hours=ttl)
     return _cache
@@ -43,7 +43,7 @@ async def _process_single(
     image_min_size: int,
     image_limit: Optional[int],
     client: MistralOCRClient,
-    factory
+    factory,
 ) -> OCRResult:
     """Process a single document."""
     try:
@@ -59,12 +59,9 @@ async def _process_single(
         )
 
     source_handler = factory.get_source(descriptor)
-    loop = asyncio.get_event_loop()
 
     # Validate and encode
-    result = await loop.run_in_executor(
-        None, source_handler.validate_and_encode, descriptor.identifier
-    )
+    result = await asyncio.to_thread(source_handler.validate_and_encode, descriptor.identifier)
     if not result.success:
         err = result.error or "Validation failed"
         err_lower = err.lower()
@@ -81,50 +78,60 @@ async def _process_single(
             file_type="unknown", source_type=descriptor.source_type.value,
             total_pages=0, pages=[], error_message=err, error_type=error_type
         )
+    if not result.data or not result.mime_type:
+        return OCRResult(
+            success=False,
+            file_path=descriptor.identifier,
+            file_type="unknown",
+            source_type=descriptor.source_type.value,
+            total_pages=0,
+            pages=[],
+            error_message="Validation succeeded but returned no data/mime_type",
+            error_type="ValidationError",
+        )
 
     # OCR processing
-    ocr_result = await loop.run_in_executor(
-        None, lambda: client.process_document(
-            result.data,
-            result.mime_type,
-            include_images=include_images,
-            save_images=save_images,
-            bypass_cache=bypass_cache,
-            image_limit=image_limit,
-            image_min_size=image_min_size,
-        )
+    ocr_result = await asyncio.to_thread(
+        client.process_document,
+        result.data,
+        result.mime_type,
+        include_images,
+        save_images,
+        bypass_cache,
+        image_limit,
+        image_min_size,
     )
 
-    if not ocr_result['success']:
+    if not ocr_result["success"]:
         return OCRResult(
             success=False, file_path=descriptor.identifier,
             file_type=source_handler.get_file_type(descriptor.identifier) or "unknown",
             source_type=descriptor.source_type.value, total_pages=0, pages=[],
-            model=ocr_result.get('model'),
-            usage=ocr_result.get('usage') or {},
-            from_cache=bool(ocr_result.get('_from_cache', False)),
-            error_message=ocr_result.get('error'),
-            error_type=ocr_result.get('error_type') or "APIError",
+            model=ocr_result.get("model"),
+            usage=ocr_result.get("usage") or {},
+            from_cache=bool(ocr_result.get("_from_cache", False)),
+            error_message=ocr_result.get("error"),
+            error_type=ocr_result.get("error_type") or "APIError",
         )
 
     # Build response
     pages = [OCRPage(
-        index=p['index'],
-        markdown=p['markdown'],
-        dimensions=p.get('dimensions'),
-        images=p.get('images', [])
-    ) for p in ocr_result['pages']]
+        index=p["index"],
+        markdown=p["markdown"],
+        dimensions=p.get("dimensions"),
+        images=p.get("images", []),
+    ) for p in ocr_result["pages"]]
 
-    images = [OCRImage(**img) for img in ocr_result['images']]
+    images = [OCRImage(**img) for img in ocr_result["images"]]
 
     return OCRResult(
         success=True, file_path=descriptor.identifier,
         file_type=source_handler.get_file_type(descriptor.identifier) or "unknown",
         source_type=descriptor.source_type.value, total_pages=len(pages),
-        pages=pages, images=images, total_images=ocr_result.get('total_images', len(images)),
-        model=ocr_result.get('model'),
-        usage=ocr_result.get('usage') or {},
-        from_cache=bool(ocr_result.get('_from_cache', False)),
+        pages=pages, images=images, total_images=ocr_result.get("total_images", len(images)),
+        model=ocr_result.get("model"),
+        usage=ocr_result.get("usage") or {},
+        from_cache=bool(ocr_result.get("_from_cache", False)),
     )
 
 
@@ -139,7 +146,7 @@ def register_ocr_tools(mcp: FastMCP) -> None:
         include_images: bool = False,
         save_images: bool = False,
         save_markdown: bool = True,
-        image_min_size: int = 100,
+        image_min_size: Optional[int] = None,
         image_limit: Optional[int] = None,
         bypass_cache: bool = False,
         output_dir: Optional[str] = None,
@@ -172,16 +179,11 @@ def register_ocr_tools(mcp: FastMCP) -> None:
             )
 
         factory = get_source_factory()
-        client = MistralOCRClient(
-            settings.api_key,
-            settings.ocr_model,
-            get_cache(),
-            api_base=settings.api_base,
-        )
+        cache = get_cache()
 
         source = url or file_path
         is_url = url is not None
-        min_size = image_min_size if image_min_size else settings.image_min_size
+        min_size = image_min_size if image_min_size is not None else settings.image_min_size
         resolved_output_dir = str(Path(output_dir).resolve()) if output_dir else settings.output_dir
         await ctx.info(f"Processing: {source}")
 
@@ -202,7 +204,12 @@ def register_ocr_tools(mcp: FastMCP) -> None:
             bypass_cache,
             min_size,
             image_limit,
-            client,
+            MistralOCRClient(
+                settings.api_key,
+                settings.ocr_model,
+                cache,
+                api_base=settings.api_base,
+            ),
             factory,
         )
 
@@ -280,18 +287,22 @@ def register_ocr_tools(mcp: FastMCP) -> None:
                 results=[], errors=["MISTRAL_API_KEY not configured"]
             )
 
-        concurrent = max_concurrent if max_concurrent else settings.max_concurrent
-        min_size = image_min_size if image_min_size else settings.image_min_size
+        concurrent = max_concurrent if max_concurrent is not None else settings.max_concurrent
+        if concurrent < 1:
+            return BatchOCRResult(
+                total_files=len(sources),
+                successful=0,
+                failed=len(sources),
+                results=[],
+                errors=[f"Invalid max_concurrent: {concurrent}"],
+            )
+
+        min_size = image_min_size if image_min_size is not None else settings.image_min_size
         resolved_output_dir = str(Path(output_dir).resolve()) if output_dir else settings.output_dir
         await ctx.info(f"Batch processing {len(sources)} sources (max {concurrent} concurrent)")
 
         factory = get_source_factory()
-        client = MistralOCRClient(
-            settings.api_key,
-            settings.ocr_model,
-            get_cache(),
-            api_base=settings.api_base,
-        )
+        cache = get_cache()
         semaphore = asyncio.Semaphore(concurrent)
 
         async def process_with_semaphore(src: str, idx: int) -> OCRResult:
@@ -306,7 +317,12 @@ def register_ocr_tools(mcp: FastMCP) -> None:
                     bypass_cache,
                     min_size,
                     image_limit,
-                    client,
+                    MistralOCRClient(
+                        settings.api_key,
+                        settings.ocr_model,
+                        cache,
+                        api_base=settings.api_base,
+                    ),
                     factory,
                 )
 

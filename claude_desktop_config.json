@@ -7,7 +7,16 @@
       ],
       "env": {
         "MISTRAL_API_KEY": "your_mistral_api_key_here",
-        "OCR_OUTPUT_DIR": "/Users/hinrayleung/Documents/OCR_Results"
+        "OCR_OUTPUT_DIR": "/Users/hinrayleung/Documents/OCR_Results",
+        "MAX_FILE_SIZE_MB": "50",
+        "OCR_CACHE_ENABLED": "true",
+        "OCR_CACHE_TTL_HOURS": "168",
+        "OCR_CACHE_DIR": "",
+        "OCR_IMAGE_MIN_SIZE": "100",
+        "OCR_MAX_CONCURRENT": "5",
+        "OCR_URL_TIMEOUT_SECONDS": "30",
+        "OCR_URL_MAX_REDIRECTS": "3",
+        "OCR_URL_ALLOW_NONSTANDARD_PORTS": "false"
       }
     }
   }

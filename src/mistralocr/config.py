@@ -55,7 +55,22 @@ class Settings:
         if not api_key:
             return None
 
-        max_size_mb = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
+        def _get_int(var_name: str, default: int) -> int:
+            raw = os.getenv(var_name)
+            if raw is None or raw == "":
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                return default
+
+        def _get_bool(var_name: str, default: bool) -> bool:
+            raw = os.getenv(var_name)
+            if raw is None or raw == "":
+                return default
+            return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+        max_size_mb = _get_int("MAX_FILE_SIZE_MB", 50)
         output_dir = os.getenv("OCR_OUTPUT_DIR", "./ocr_output")
 
         return cls(
@@ -66,15 +81,14 @@ class Settings:
             log_level=os.getenv("MCP_LOG_LEVEL", "INFO"),
             max_file_size=max_size_mb * 1024 * 1024,
             output_dir=str(Path(output_dir).resolve()),
-            cache_enabled=os.getenv("OCR_CACHE_ENABLED", "true").lower() == "true",
-            cache_ttl_hours=int(os.getenv("OCR_CACHE_TTL_HOURS", "168")),
+            cache_enabled=_get_bool("OCR_CACHE_ENABLED", True),
+            cache_ttl_hours=_get_int("OCR_CACHE_TTL_HOURS", 168),
             cache_dir=os.getenv("OCR_CACHE_DIR"),
-            image_min_size=int(os.getenv("OCR_IMAGE_MIN_SIZE", "100")),
-            max_concurrent=int(os.getenv("OCR_MAX_CONCURRENT", "5")),
-            url_timeout_seconds=int(os.getenv("OCR_URL_TIMEOUT_SECONDS", "30")),
-            url_max_redirects=int(os.getenv("OCR_URL_MAX_REDIRECTS", "3")),
-            url_allow_nonstandard_ports=os.getenv("OCR_URL_ALLOW_NONSTANDARD_PORTS", "false").lower()
-            == "true",
+            image_min_size=_get_int("OCR_IMAGE_MIN_SIZE", 100),
+            max_concurrent=_get_int("OCR_MAX_CONCURRENT", 5),
+            url_timeout_seconds=_get_int("OCR_URL_TIMEOUT_SECONDS", 30),
+            url_max_redirects=_get_int("OCR_URL_MAX_REDIRECTS", 3),
+            url_allow_nonstandard_ports=_get_bool("OCR_URL_ALLOW_NONSTANDARD_PORTS", False),
         )
 
 
