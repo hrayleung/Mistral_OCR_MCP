@@ -308,6 +308,14 @@ def register_ocr_tools(mcp: FastMCP) -> None:
         cache = get_cache()
         semaphore = asyncio.Semaphore(concurrent)
 
+        # Reuse single client for all batch requests (connection pooling)
+        client = MistralOCRClient(
+            settings.api_key,
+            settings.ocr_model,
+            cache,
+            api_base=settings.api_base,
+        )
+
         async def process_with_semaphore(src: str, idx: int) -> OCRResult:
             async with semaphore:
                 descriptor = factory.create_descriptor_auto(src)
@@ -320,12 +328,7 @@ def register_ocr_tools(mcp: FastMCP) -> None:
                     bypass_cache,
                     min_size,
                     image_limit,
-                    MistralOCRClient(
-                        settings.api_key,
-                        settings.ocr_model,
-                        cache,
-                        api_base=settings.api_base,
-                    ),
+                    client,
                     factory,
                 )
 

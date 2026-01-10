@@ -58,7 +58,12 @@ class URLSource(DocumentSource):
             self._client = httpx.Client(
                 timeout=httpx.Timeout(self.timeout),
                 follow_redirects=False,
-                headers={'User-Agent': 'MistralOCR-MCP/1.0'}
+                headers={'User-Agent': 'MistralOCR-MCP/1.0'},
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,
+                    max_connections=20,
+                    keepalive_expiry=30.0
+                )
             )
         return self._client
 
