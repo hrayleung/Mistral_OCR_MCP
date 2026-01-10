@@ -42,7 +42,7 @@ class MarkdownWriter:
             if missing := [f for f in required if f not in ocr_result]:
                 return MarkdownWriteResult(False, error=f"Missing: {missing}")
 
-            base = base_filename or self._derive_filename(ocr_result['file_path'])
+            base = base_filename or self.derive_filename(ocr_result['file_path'])
             path = Path(output_path).resolve() if output_path else self._generate_path(base)
             content = self._format(ocr_result, datetime.now())
             path.write_text(content, encoding='utf-8')
@@ -59,7 +59,7 @@ class MarkdownWriter:
         results = {}
         for idx, result in enumerate(batch_results):
             source = result.get('file_path', f'file_{idx}')
-            base = f"{batch_name}_{idx:02d}_{self._derive_filename(source)}" if batch_name else None
+            base = f"{batch_name}_{idx:02d}_{self.derive_filename(source)}" if batch_name else None
             results[source] = self.write_ocr_result(result, base)
         return results
 
@@ -67,9 +67,7 @@ class MarkdownWriter:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def derive_filename(self, file_path: str) -> str:
-        return self._derive_filename(file_path)
-
-    def _derive_filename(self, file_path: str) -> str:
+        """Derive a clean filename from a file path or URL."""
         if file_path.startswith(('http://', 'https://')):
             return sanitize_filename(extract_filename_from_url(file_path), file_path)
         return sanitize_filename(Path(file_path).stem, file_path)

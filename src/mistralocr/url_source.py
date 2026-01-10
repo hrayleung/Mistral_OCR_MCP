@@ -8,8 +8,7 @@ import logging
 import socket
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin
-from urllib.parse import urlparse, ParseResult
+from urllib.parse import urljoin, urlparse, ParseResult
 
 import httpx
 
@@ -180,5 +179,5 @@ class URLSource(DocumentSource):
 
     def _resolve_mime(self, content_type: str, parsed: ParseResult) -> str:
         if content_type and content_type.startswith(('application/', 'image/', 'text/')):
-            return content_type.split(';')[0].strip()
+            return content_type
         return get_mime_type(Path(parsed.path).suffix)

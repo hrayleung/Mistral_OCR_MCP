@@ -99,12 +99,10 @@ class MistralOCRClient:
 
         try:
             data_uri = f"data:{mime_type};base64,{base64_data}"
-            doc_type = "image_url" if mime_type.startswith("image/") else "document_url"
-            document = (
-                {"type": doc_type, "image_url": {"url": data_uri}}
-                if doc_type == "image_url"
-                else {"type": doc_type, "document_url": data_uri}
-            )
+            if mime_type.startswith("image/"):
+                document = {"type": "image_url", "image_url": {"url": data_uri}}
+            else:
+                document = {"type": "document_url", "document_url": data_uri}
 
             response: Optional[OCRResponse] = None
             last_error: Optional[Exception] = None

@@ -16,6 +16,16 @@ class DocumentSourceFactory:
         self._local: Optional[LocalFileSource] = None
         self._url: Optional[URLSource] = None
 
+    def _get_local(self) -> LocalFileSource:
+        if not self._local:
+            self._local = LocalFileSource()
+        return self._local
+
+    def _get_url(self) -> URLSource:
+        if not self._url:
+            self._url = URLSource()
+        return self._url
+
     def create_descriptor(
         self, file_path: Optional[str] = None, url: Optional[str] = None
     ) -> DocumentDescriptor:
@@ -24,37 +34,29 @@ class DocumentSourceFactory:
             raise ValueError("Provide exactly one of file_path or url")
 
         if file_path:
-            src = LocalFileSource()
             return DocumentDescriptor(
-                DocumentSourceType.LOCAL_FILE, file_path, src.get_display_name(file_path)
+                DocumentSourceType.LOCAL_FILE, file_path, self._get_local().get_display_name(file_path)
             )
-        src = URLSource()
         return DocumentDescriptor(
-            DocumentSourceType.URL, url, src.get_display_name(url)
+            DocumentSourceType.URL, url, self._get_url().get_display_name(url)
         )
 
     def create_descriptor_auto(self, source: str) -> DocumentDescriptor:
         """Auto-detect source type from string."""
         if source.lower().startswith(('http://', 'https://')):
-            src = URLSource()
             return DocumentDescriptor(
-                DocumentSourceType.URL, source, src.get_display_name(source)
+                DocumentSourceType.URL, source, self._get_url().get_display_name(source)
             )
-        src = LocalFileSource()
         return DocumentDescriptor(
-            DocumentSourceType.LOCAL_FILE, source, src.get_display_name(source)
+            DocumentSourceType.LOCAL_FILE, source, self._get_local().get_display_name(source)
         )
 
     def get_source(self, descriptor: DocumentDescriptor) -> DocumentSource:
         """Get source handler for descriptor."""
         if descriptor.source_type == DocumentSourceType.LOCAL_FILE:
-            if not self._local:
-                self._local = LocalFileSource()
-            return self._local
+            return self._get_local()
         if descriptor.source_type == DocumentSourceType.URL:
-            if not self._url:
-                self._url = URLSource()
-            return self._url
+            return self._get_url()
         raise ValueError(f"Unknown source type: {descriptor.source_type}")
 
     def close(self) -> None:

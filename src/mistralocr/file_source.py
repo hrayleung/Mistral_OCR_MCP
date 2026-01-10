@@ -76,7 +76,4 @@ class LocalFileSource(DocumentSource):
     def _has_symlink(self, file_path: str) -> bool:
         """Check if path contains symlinks."""
         current = Path(file_path).expanduser().absolute()
-        for p in [current] + list(current.parents):
-            if p.is_symlink():
-                return True
-        return False
+        return any(p.is_symlink() for p in [current] + list(current.parents))

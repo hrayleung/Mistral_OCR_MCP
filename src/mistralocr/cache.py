@@ -106,34 +106,29 @@ class OCRCache:
                 else:
                     remaining += 1
             except Exception:
-                try:
-                    f.unlink(missing_ok=True)
-                    deleted += 1
-                except Exception:
-                    pass
+                f.unlink(missing_ok=True)
+                deleted += 1
         return {"deleted": deleted, "remaining": remaining, "cache_dir": str(self.cache_dir)}
 
     def stats(self) -> dict:
         """Return basic cache stats without reading contents."""
         count = 0
         total_bytes = 0
-        oldest_mtime: Optional[float] = None
-        newest_mtime: Optional[float] = None
+        mtimes: list[float] = []
         for f in self.cache_dir.glob("*.json"):
             try:
                 st = f.stat()
+                count += 1
+                total_bytes += st.st_size
+                mtimes.append(st.st_mtime)
             except Exception:
                 continue
-            count += 1
-            total_bytes += st.st_size
-            oldest_mtime = st.st_mtime if oldest_mtime is None else min(oldest_mtime, st.st_mtime)
-            newest_mtime = st.st_mtime if newest_mtime is None else max(newest_mtime, st.st_mtime)
 
         return {
             "cache_dir": str(self.cache_dir),
             "entries": count,
             "total_bytes": total_bytes,
             "ttl_seconds": int(self.ttl.total_seconds()),
-            "oldest_mtime": datetime.fromtimestamp(oldest_mtime).isoformat() if oldest_mtime else None,
-            "newest_mtime": datetime.fromtimestamp(newest_mtime).isoformat() if newest_mtime else None,
+            "oldest_mtime": datetime.fromtimestamp(min(mtimes)).isoformat() if mtimes else None,
+            "newest_mtime": datetime.fromtimestamp(max(mtimes)).isoformat() if mtimes else None,
         }

@@ -34,6 +34,18 @@ def get_cache() -> Optional[OCRCache]:
     return _cache
 
 
+def _classify_validation_error(error: str) -> str:
+    """Classify validation error into error type."""
+    err_lower = error.lower()
+    if "timeout" in err_lower:
+        return "TimeoutError"
+    if err_lower.startswith("http ") or "connection failed" in err_lower:
+        return "ConnectionError"
+    if "permission denied" in err_lower or "failed to read file" in err_lower:
+        return "FileProcessingError"
+    return "ValidationError"
+
+
 async def _process_single(
     source: str,
     is_url: bool,
@@ -64,19 +76,10 @@ async def _process_single(
     result = await asyncio.to_thread(source_handler.validate_and_encode, descriptor.identifier)
     if not result.success:
         err = result.error or "Validation failed"
-        err_lower = err.lower()
-        if "timeout" in err_lower:
-            error_type = "TimeoutError"
-        elif err_lower.startswith("http ") or "connection failed" in err_lower:
-            error_type = "ValidationError"
-        elif "permission denied" in err_lower or "failed to read file" in err_lower:
-            error_type = "FileProcessingError"
-        else:
-            error_type = "ValidationError"
         return OCRResult(
             success=False, file_path=descriptor.identifier,
             file_type="unknown", source_type=descriptor.source_type.value,
-            total_pages=0, pages=[], error_message=err, error_type=error_type
+            total_pages=0, pages=[], error_message=err, error_type=_classify_validation_error(err)
         )
     if not result.data or not result.mime_type:
         return OCRResult(
